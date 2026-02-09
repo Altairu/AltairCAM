@@ -20,12 +20,15 @@ class GeometryType(Enum):
 
 @dataclass
 class Point:
-    """2D点"""
+    """2D/3D点"""
     x: float
     y: float
+    z: float = 0.0  # デフォルトは0（2D互換）
     
     def __repr__(self):
-        return f"Point({self.x:.3f}, {self.y:.3f})"
+        if self.z == 0.0:
+            return f"Point({self.x:.3f}, {self.y:.3f})"
+        return f"Point({self.x:.3f}, {self.y:.3f}, {self.z:.3f})"
 
 
 @dataclass

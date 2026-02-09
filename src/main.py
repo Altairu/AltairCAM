@@ -74,6 +74,7 @@ class AltairCAMApp:
         tools_menu.add_command(label="プレビュー更新", command=self._update_preview)
         tools_menu.add_separator()
         tools_menu.add_command(label="3Dプレビュー", command=self._show_3d_preview)
+        tools_menu.add_command(label="切削シミュレーション", command=self._show_simulation)
         
         # ヘルプメニュー
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -105,6 +106,16 @@ class AltairCAMApp:
             )
         except Exception as e:
             messagebox.showerror("エラー", f"3Dプレビューの表示に失敗しました:\n{str(e)}")
+    
+    def _show_simulation(self):
+        """切削シミュレーションを表示"""
+        try:
+            from ui.simulation_window import SimulationWindow
+            
+            # シミュレーションウィンドウを開く
+            SimulationWindow(self.root)
+        except Exception as e:
+            messagebox.showerror("エラー", f"シミュレーションの表示に失敗しました:\n{str(e)}")
     
     def _build_ui(self):
         """UIを構築"""
