@@ -14,7 +14,7 @@ KiCadで作成したガーバーファイル・ドリルファイルからCNC加
 
 ```bash
 # リポジトリをクローン
-git clone https://github.com/yourusername/AltairCAM.git
+git clone https://github.com/Altairu/AltairCAM.git
 cd AltairCAM
 
 # 依存パッケージをインストール
