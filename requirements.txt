@@ -1,0 +1,12 @@
+# AltairCAM 依存パッケージ
+
+# 幾何計算
+shapely==2.0.2
+numpy==1.26.2
+
+# 描画・プレビュー
+matplotlib==3.8.2
+pillow==10.1.0
+
+# ユーティリティ
+
