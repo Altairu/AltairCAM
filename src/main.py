@@ -73,7 +73,7 @@ class AltairCAMApp:
         menubar.add_cascade(label="ツール", menu=tools_menu)
         tools_menu.add_command(label="プレビュー更新", command=self._update_preview)
         tools_menu.add_separator()
-        tools_menu.add_command(label="3Dプレビュー", command=self._show_3d_preview, state=tk.DISABLED)
+        tools_menu.add_command(label="3Dプレビュー", command=self._show_3d_preview)
         
         # ヘルプメニュー
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -84,8 +84,27 @@ class AltairCAMApp:
         help_menu.add_command(label="バージョン情報", command=lambda: HelpDialog.show_about(self.root))
     
     def _show_3d_preview(self):
-        """3Dプレビューを表示（未実装）"""
-        messagebox.showinfo("準備中", "3Dプレビュー機能は次のバージョンで実装予定です")
+        """3Dプレビューを表示"""
+        # データが読み込まれているか確認
+        if not (self.b_cu_config.data or self.edge_cuts_config.data or self.drill_config.data):
+            messagebox.showwarning("警告", "まずファイルを読み込んでください")
+            return
+        
+        try:
+            from ui.preview_3d import Preview3DWindow
+            
+            # 3Dプレビューウィンドウを開く
+            Preview3DWindow(
+                self.root,
+                b_cu_geometry=self.b_cu_config.data if self.b_cu_config.enabled.get() else None,
+                b_cu_tool_diameter=float(self.b_cu_config.tool_diameter.get()) if self.b_cu_config.data else 0.5,
+                edge_cuts_geometry=self.edge_cuts_config.data if self.edge_cuts_config.enabled.get() else None,
+                edge_cuts_tool_diameter=float(self.edge_cuts_config.tool_diameter.get()) if self.edge_cuts_config.data else 0.5,
+                drill_data=self.drill_config.data if self.drill_config.enabled.get() else None,
+                drill_tool_diameter=float(self.drill_config.tool_diameter.get()) if self.drill_config.data else 0.8
+            )
+        except Exception as e:
+            messagebox.showerror("エラー", f"3Dプレビューの表示に失敗しました:\n{str(e)}")
     
     def _build_ui(self):
         """UIを構築"""
