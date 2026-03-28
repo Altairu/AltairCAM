@@ -7,7 +7,7 @@ KiCad等で設計したPCBをCNCマシンで自作加工するための、軽量
 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.8-3.12](https://img.shields.io/badge/python-3.8%20~%203.12-blue.svg)](https://www.python.org/downloads/)
 
 
 ## 📥 ダウンロード ＆ インストール
@@ -90,7 +90,7 @@ python src/main.py
 
 ## 🛠 技術スタック & 構造
 
-- **言語:** Python 3.8+
+- **言語:** Python 3.8 〜 3.12
 - **GUI:** Tkinter
 - **演算・プレビュー:** Shapely, NumPy, Matplotlib
 - **パッケージング:** cx_Freeze
@@ -122,6 +122,24 @@ AltairCAM/
 
 
 ## 🔧 トラブルシューティング
+
+**Q: Python 3.13以降（例：3.14）を使用しているとCAMが起動しない / エラーが出る**
+A: AltairCAMはPython **3.8〜3.12** を対象としています。Python 3.13以降では依存ライブラリ（numpy, shapely等）が対応していないため、正常に動作しない場合があります。
+Python 3.11の仮想環境を作成して実行してください:
+
+```bash
+# Python 3.11がインストール済みの場合（Windowsの例）
+py -3.11 -m venv venv311
+venv311\Scripts\activate
+
+# macOS / Linux の場合
+python3.11 -m venv venv311
+source venv311/bin/activate
+
+# 仮想環境に依存パッケージをインストールして起動
+pip install -r requirements.txt
+python src/main.py
+```
 
 **Q: Gコードが生成できない / エラーが出る**
 A: ログウィンドウにエラー内容が表示されます。配線やベタの結合に失敗する場合は、ガーバー出力時のフォーマットが正しいか確認してください。
