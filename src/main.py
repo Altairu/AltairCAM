@@ -58,6 +58,23 @@ class AltairCAMApp:
         self.root.title("AltairCAM - PCB CNC Tool")
         self.root.geometry("1600x900")
         
+        # アイコンの設定
+        try:
+            import os, sys
+            if getattr(sys, 'frozen', False):
+                # cx_Freezeなどでビルドされた場合
+                base_path = os.path.dirname(sys.executable)
+            else:
+                # ソースコードから実行された場合
+                base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            
+            icon_path = os.path.join(base_path, 'AltairCAM.ico')
+            if os.path.exists(icon_path):
+                self.root.iconbitmap(icon_path)
+        except Exception as e:
+            # アイコン読み込み失敗時もアプリは継続
+            print(f"Failed to load icon: {e}")
+        
         # 3つのファイル設定
         self.b_cu_config = FileConfig("B_Cu", default_tool_dia="0.1", default_depth="-0.05")
         self.edge_cuts_config = FileConfig("Edge_Cuts", default_tool_dia="1.0", default_depth="-1.6")

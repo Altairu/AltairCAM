@@ -1,0 +1,12 @@
+LICENSE
+README.md
+build_msi.py
+src/AltairCAM.egg-info/PKG-INFO
+src/AltairCAM.egg-info/SOURCES.txt
+src/AltairCAM.egg-info/dependency_links.txt
+src/AltairCAM.egg-info/top_level.txt
+tests/test_drill_debug.py
+tests/test_full_workflow.py
+tests/test_gerber_parser.py
+tests/test_optimizer.py
+tests/test_preview.py
