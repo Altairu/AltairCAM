@@ -425,7 +425,7 @@ class AdvancedToolpathGenerator:
         """
         return self.generate_toolpaths(geometry)
     
-    def generate_drill_toolpath(self, drill_data: DrillData, optimize_order: bool = False) -> List[Point]:
+    def generate_drill_toolpath(self, drill_data: DrillData, optimize_order: bool = False) -> List[Tuple[Point, float]]:
         """
         ドリルデータのツールパスを生成 (互換性メソッド)
         
@@ -436,19 +436,18 @@ class AdvancedToolpathGenerator:
         Returns:
             ツールパス（単一の連続パス）
         """
-        # ドリル穴を順序付きリストに変換
-        paths = [[hole] for hole in drill_data.holes]
-        
         if optimize_order:
-            # パス順序を最適化
-            paths = self._optimize_path_sequence(paths)
-        
-        # リストを単一パスに平坦化
-        single_path = []
-        for path in paths:
-            single_path.extend(path)
-        
-        return single_path
+            # 最適化機能を使用
+            from core.optimizer import ToolpathOptimizer
+            optimizer = ToolpathOptimizer()
+            optimized_indices, _ = optimizer.optimize_drill_path(drill_data)
+            
+            # 最適化された順序でリストを生成
+            return [(drill_data.holes[idx].position, drill_data.holes[idx].diameter) 
+                    for idx in optimized_indices]
+        else:
+            # ドリルデータをそのまま返す
+            return [(hole.position, hole.diameter) for hole in drill_data.holes]
     
     def optimize_path_order(self, paths: List[List[Point]]) -> List[List[Point]]:
         """
