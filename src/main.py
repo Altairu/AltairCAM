@@ -7,6 +7,38 @@ FlatCAMのアルゴリズムを参考にした軽量化版CAM
 （FlatCAMはMITライセンス - 詳細はATTRIBUTION.mdを参照）
 """
 
+import sys
+
+# Pythonバージョンチェック（3.8以上3.13未満が必須）
+if sys.version_info < (3, 8) or sys.version_info >= (3, 13):
+    _ver = sys.version.split()[0]
+    _msg = (
+        f"AltairCAMはPython 3.8〜3.12に対応しています。\n"
+        f"現在のバージョン: Python {_ver}\n\n"
+        "Python 3.13以降では依存ライブラリ（numpy, shapely等）が\n"
+        "正常に動作しない場合があります。\n\n"
+        "Python 3.11の仮想環境を作成して実行することを推奨します:\n"
+        "  (Windows)\n"
+        "    py -3.11 -m venv venv311\n"
+        "    venv311/Scripts/activate\n"
+        "  (macOS / Linux)\n"
+        "    python3.11 -m venv venv311\n"
+        "    source venv311/bin/activate\n"
+        "  pip install -r requirements.txt\n"
+        "  python src/main.py"
+    )
+    try:
+        import tkinter as _tk
+        import tkinter.messagebox as _mb
+        _root = _tk.Tk()
+        _root.withdraw()
+        _mb.showwarning("Pythonバージョン警告", _msg)
+        _root.destroy()
+    except ImportError:
+        print(f"警告: {_msg}")
+    except Exception:
+        print(f"警告: {_msg}")
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
