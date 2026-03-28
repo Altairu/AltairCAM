@@ -69,45 +69,95 @@ class PreviewCanvas:
             alpha: 透明度
         """
         self.geometry = geometry
-        
-        # 線幅を計算（ポイント単位）- ツール直径に基づく
-        # 1mm = 約2.83ポイント（72 DPI想定）
-        linewidth = max(tool_diameter * 2.83, 0.5)
-        
-        # 線分を描画
+
+        # 各線分をアパーチャ幅（line.width）で描画
+        # Matplotlib の linewidth はポイント単位（1pt ≒ 1/72 inch）
+        # 実寸 1mm ≒ 2.83 pt @ 72dpi だが、Figure の DPI と axes の
+        # 実スケールによって変わるため、ここでは見やすさ優先で簡易計算する。
+        PTS_PER_MM = 2.83
+
         for i, line in enumerate(geometry.lines):
+            # line.width: アパーチャ幅(mm)。0 なら最小幅で描画
+            lw = max(line.width * PTS_PER_MM, 0.5)
             self.ax.plot(
                 [line.start.x, line.end.x],
                 [line.start.y, line.end.y],
                 color=color,
-                linewidth=linewidth,
+                linewidth=lw,
+                solid_capstyle='round',   # 線端を丸くして銅箔らしく見せる
                 alpha=alpha,
                 label=label if i == 0 else ""
             )
         
-        # 円を描画
+        # 円（パッド）を描画 - 塗りつぶしで実寸表示
         for circle in geometry.circles:
             circle_patch = plt.Circle(
                 (circle.center.x, circle.center.y),
                 circle.radius,
                 color=color,
-                fill=False,
-                linewidth=linewidth,
-                alpha=alpha
+                fill=True,
+                alpha=alpha * 0.8,
             )
             self.ax.add_patch(circle_patch)
         
-        # 円弧を描画（簡易実装）
+        # 円弧を描画
         for arc in geometry.arcs:
-            # TODO: 完全な円弧描画の実装
-            self.ax.plot(
-                [arc.start.x, arc.end.x],
-                [arc.start.y, arc.end.y],
-                color=color,
-                linewidth=linewidth,
-                linestyle='--',
-                alpha=alpha
-            )
+            import math
+            
+            # 半径を計算
+            dx = arc.start.x - arc.center.x
+            dy = arc.start.y - arc.center.y
+            radius = math.sqrt(dx*dx + dy*dy)
+            
+            if radius > 0.001:
+                # 開始角度と終了角度を計算
+                start_angle = math.atan2(arc.start.y - arc.center.y, arc.start.x - arc.center.x)
+                end_angle = math.atan2(arc.end.y - arc.center.y, arc.end.x - arc.center.x)
+                
+                # 円弧の角度範囲を計算
+                if arc.clockwise:
+                    # 時計回り
+                    if end_angle > start_angle:
+                        end_angle -= 2 * math.pi
+                    angles = [start_angle - t * (start_angle - end_angle) for t in [i/50 for i in range(51)]]
+                else:
+                    # 反時計回り
+                    if end_angle < start_angle:
+                        end_angle += 2 * math.pi
+                    angles = [start_angle + t * (end_angle - start_angle) for t in [i/50 for i in range(51)]]
+                
+                # 円弧の座標を計算
+                arc_x = [arc.center.x + radius * math.cos(angle) for angle in angles]
+                arc_y = [arc.center.y + radius * math.sin(angle) for angle in angles]
+                
+                self.ax.plot(
+                    arc_x,
+                    arc_y,
+                    color=color,
+                    linewidth=linewidth,
+                    alpha=alpha
+                )
+            else:
+                # 退化した円弧 - 直線として表示
+                self.ax.plot(
+                    [arc.start.x, arc.end.x],
+                    [arc.start.y, arc.end.y],
+                    color=color,
+                    linewidth=linewidth,
+                    alpha=alpha
+                )
+        
+        # ポリゴン（ベタ塗り領域）は輪郭線のみ薄く表示（塗りつぶしなし）
+        # GNDベタなど大きなポリゴンが全体を塗りつぶして視認性を損なうのを防ぐ
+        for polygon in geometry.polygons:
+            if len(polygon.points) < 2:
+                continue
+            xs = [p.x for p in polygon.points]
+            ys = [p.y for p in polygon.points]
+            if xs[0] != xs[-1] or ys[0] != ys[-1]:
+                xs.append(xs[0])
+                ys.append(ys[0])
+            self.ax.plot(xs, ys, color=color, linewidth=0.5, alpha=0.3, linestyle='dotted')
     
     def draw_drill_data(self, drill_data: DrillData, tool_diameter: float = None,
                        color='red', label='Drill', alpha=0.8):

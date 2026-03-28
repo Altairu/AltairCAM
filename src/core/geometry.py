@@ -33,12 +33,13 @@ class Point:
 
 @dataclass
 class Line:
-    """線分"""
+    """線分（銅箔トレース）"""
     start: Point
     end: Point
+    width: float = 0.0  # アパーチャ幅 = 銅箔の太さ (mm)
     
     def __repr__(self):
-        return f"Line({self.start} -> {self.end})"
+        return f"Line({self.start} -> {self.end}, w={self.width:.3f})"
 
 
 @dataclass
@@ -48,10 +49,11 @@ class Arc:
     end: Point
     center: Point
     clockwise: bool  # True: 時計回り, False: 反時計回り
+    width: float = 0.0  # アパーチャ幅 = 銅箔の太さ (mm)
     
     def __repr__(self):
         direction = "CW" if self.clockwise else "CCW"
-        return f"Arc({self.start} -> {self.end}, center={self.center}, {direction})"
+        return f"Arc({self.start} -> {self.end}, center={self.center}, {direction}, w={self.width:.3f})"
 
 
 @dataclass
@@ -91,13 +93,13 @@ class Geometry:
         self.circles = []
         self.polygons = []
     
-    def add_line(self, start: Point, end: Point):
+    def add_line(self, start: Point, end: Point, width: float = 0.0):
         """線分を追加"""
-        self.lines.append(Line(start, end))
+        self.lines.append(Line(start, end, width))
     
-    def add_arc(self, start: Point, end: Point, center: Point, clockwise: bool):
+    def add_arc(self, start: Point, end: Point, center: Point, clockwise: bool, width: float = 0.0):
         """円弧を追加"""
-        self.arcs.append(Arc(start, end, center, clockwise))
+        self.arcs.append(Arc(start, end, center, clockwise, width))
     
     def add_circle(self, center: Point, radius: float):
         """円を追加"""

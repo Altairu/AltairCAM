@@ -4,15 +4,27 @@
 
 KiCadで設計したPCBをCNCマシンで加工するためのツールパス生成ソフトウェアです。ガーバーファイルとExcellonドリルファイルからGコードを生成します。
 
+> **⭐ FlatCAMの証明されたアルゴリズムを活用した改良版**
+> 
+> FlatCAM由来の高度なガーバーパーサー、精密な円弧補間、最適化されたアイソレーションルーティング、Nearest Neighbor法によるパス最適化などを実装。軽量でありながら正確で効率的なツールパス生成を実現します。
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
 ## 主な機能
 
-- ✅ **ガーバーファイル解析** - RS-274X形式に対応
+### コア機能
+- ✅ **高度なガーバーファイル解析** - RS-274X形式に完全対応（FlatCAM由来アルゴリズム）
 - ✅ **Excellonドリルファイル解析** - decimal/integer形式の両対応
 - ✅ **3レイヤー管理** - B_Cu（銅箔）、Edge_Cuts（基板外形）、Drill（ドリル穴）を個別管理
-- ✅ **ツールパス最適化** - 移動距離を最大60%削減（Nearest Neighbor法）
+
+### ツールパス生成
+- ✅ **精密なアイソレーションルーティング** - FlatCAM由来の正確なオフセット計算
+- ✅ **円弧補間処理** - 高精度な円弧の直線近似（0.05mm単位）
+- ✅ **パス簡潔化** - Ramer-Douglas-Peucker アルゴリズムで不要な点を削除
+- ✅ **ツールパス最適化** - Nearest Neighbor法で移動距離を最大60%削減
+
+### ユーザーインターフェース
 - ✅ **2Dプレビュー** - ツール直径に基づいた視覚的表示
 - ✅ **3Dプレビュー** - 基板を立体表示、回転・ズーム操作可能
 - ✅ **切削シミュレーション** - Gコードをアニメーション再生
@@ -118,7 +130,11 @@ KiCadからファイルをエクスポート：
 - **言語:** Python 3.8+
 - **GUI:** Tkinter
 - **プレビュー:** Matplotlib
-- **最適化:** Nearest Neighbor法（TSP近似解法）
+- **コアアルゴリズム:** FlatCAM由来
+  - 高度なガーバーパーサー（RS-274X完全対応）
+  - 精密な円弧補間処理
+  - Nearest Neighbor法によるパス最適化
+  - Ramer-Douglas-Peucker パス簡潔化
 
 ## プロジェクト構造
 
@@ -127,19 +143,24 @@ AltairCAM/
 ├── src/
 │   ├── main.py              # メインアプリケーション
 │   ├── core/
-│   │   ├── gerber_parser.py # ガーバーパーサー
-│   │   ├── excellon_parser.py # Excellonパーサー
 │   │   ├── geometry.py      # 幾何データ構造
+│   │   ├── gerber_parser.py # ガーバーパーサー（従来版）
+│   │   ├── advanced_gerber.py # ✨ 高度なガーバーパーサー（FlatCAM由来）
+│   │   ├── excellon_parser.py # Excellonパーサー
 │   │   ├── mirror.py        # 反転機能
-│   │   ├── toolpath.py      # ツールパス生成
+│   │   ├── toolpath.py      # ツールパス生成（従来版）
+│   │   ├── advanced_toolpath.py # ✨ 改良版ツールパス生成（FlatCAM由来）
 │   │   └── optimizer.py     # ツールパス最適化
 │   ├── gcode/
 │   │   └── generator.py     # Gコード生成
 │   └── ui/
 │       ├── preview.py       # 2Dプレビュー
+│       ├── preview_3d.py    # 3Dプレビュー
+│       ├── simulator.py     # 切削シミュレーター
 │       └── help_dialog.py   # ヘルプダイアログ
 ├── tests/                   # テストスクリプト
 ├── sample/                  # サンプルファイル
+├── ATTRIBUTION.md           # FlatCAMライセンス表記
 ├── requirements.txt
 └── README.md
 ```
@@ -152,14 +173,26 @@ AltairCAM/
 
 [MIT License](LICENSE) - 自由に使用、修正、配布できます。
 
+### FlatCAM由来コンポーネント
+
+AltairCAMは、FlatCAMプロジェクト（MIT License）から以下のアルゴリズムと設計思想を参考にしています：
+
+- **ガーバーファイルパーサー** - RS-274X完全対応
+- **アイソレーションルーティング** - 正確なオフセット計算
+- **円弧補間** - 精密な直線近似処理
+- **ツールパス最適化** - Nearest Neighbor法
+- **パス簡潔化** - Ramer-Douglas-Peucker アルゴリズム
+
+詳細は [ATTRIBUTION.md](ATTRIBUTION.md) を参照してください。
+
 ## 作者
 
 - GitHub: [@Altairu](https://github.com/Altairu)
 
 ## 謝辞
 
-- FlatCAMプロジェクトからのインスピレーション
-- KiCadコミュニティ
+- **FlatCAMプロジェクト** - PCB CAM設計におけるアルゴリズムと最適化手法の実装例
+- **KiCadコミュニティ** - オープンソースPCB設計ツール and ガーバーフォーマット仕様
 
 ## トラブルシューティング
 
@@ -181,10 +214,26 @@ A: ログウィンドウでエラーメッセージを確認してください�
 - [x] 3Dプレビュー
 - [x] 切削シミュレーション
 - [ ] 複数レイヤーの銅箔対応
-- [ ] オートレベリング対応
 - [ ] 実行可能ファイル(.exe)のビルド
 
 ---
 
+## バージョン履歴
+
+### v2.0.0 (2026-02-19)
+- ✨ **FlatCAM由来アルゴリズムを実装**
+- 高度なガーバーパーサーの統合
+- 改良版ツールパス生成エンジンの統合
+- パス簡潔化（RDP）の実装
+- 円弧補間精度向上
+
+### v1.0.0 (初版)
+- 基本的なガーバー/ドリル解析
+- 2D/3Dプレビュー
+- ツールパス最適化
+- Gコード生成
+
+---
+
 **⚠️ 注意:**
-このソフトウェアは個人的なプロジェクトです。CNC加工は危険を伴う作業です。生成されたGコードは必ず確認し、ドライラン（空送り）でテストしてから実際の加工を行ってください。
+このソフトウェアは改良型個人プロジェクトです（FlatCAM のアルゴリズム参考）。CNC加工は危険を伴う作業です。生成されたGコードは必ず確認し、ドライラン（空送り）でテストしてから実際の加工を行ってください。

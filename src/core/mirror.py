@@ -60,7 +60,7 @@ def mirror_geometry(geometry: Geometry, axis: MirrorAxis, reference: float = Non
     for line in geometry.lines:
         mirrored_start = mirror_point(line.start, axis, reference)
         mirrored_end = mirror_point(line.end, axis, reference)
-        mirrored.add_line(mirrored_start, mirrored_end)
+        mirrored.add_line(mirrored_start, mirrored_end, line.width)
     
     # 円弧を反転
     for arc in geometry.arcs:
@@ -69,7 +69,7 @@ def mirror_geometry(geometry: Geometry, axis: MirrorAxis, reference: float = Non
         mirrored_center = mirror_point(arc.center, axis, reference)
         # 反転すると回転方向が逆になる
         mirrored_clockwise = not arc.clockwise
-        mirrored.add_arc(mirrored_start, mirrored_end, mirrored_center, mirrored_clockwise)
+        mirrored.add_arc(mirrored_start, mirrored_end, mirrored_center, mirrored_clockwise, arc.width)
     
     # 円を反転
     for circle in geometry.circles:

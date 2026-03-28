@@ -2,6 +2,9 @@
 AltairCAM メインプログラム（3ファイル対応版）
 
 B_Cu、Edge_Cuts、Drillの3つのファイルを個別管理できるCAMソフトウェア
+
+FlatCAMのアルゴリズムを参考にした軽量化版CAM
+（FlatCAMはMITライセンス - 詳細はATTRIBUTION.mdを参照）
 """
 
 import tkinter as tk
@@ -9,13 +12,21 @@ from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 from typing import Optional
 
-from core.gerber_parser import GerberParser
+# 改良版パーサーとツールパス生成を使用
+try:
+    from core.advanced_gerber import AdvancedGerberParser as GerberParser
+    from core.advanced_toolpath import AdvancedToolpathGenerator as ToolpathGenerator
+except ImportError:
+    # フォールバック
+    from core.gerber_parser import GerberParser
+    from core.toolpath import ToolpathGenerator
+
 from core.excellon_parser import ExcellonParser
 from core.mirror import mirror_geometry, mirror_drill_data, MirrorAxis
-from core.toolpath import ToolpathGenerator
 from gcode.generator import GCodeGenerator
 from ui.preview import PreviewCanvas
 from core.geometry import Geometry, DrillData
+
 
 
 class FileConfig:
@@ -29,6 +40,13 @@ class FileConfig:
         self.cut_depth = tk.StringVar(value=default_depth)
         self.feed_rate = tk.StringVar(value="100")
         self.optimize_toolpath = tk.BooleanVar(value=False)  # ツールパス最適化
+        
+        # 詳細設定
+        self.safe_z = tk.StringVar(value="5.0")  # 安全高さ（ホームポジション）
+        self.travel_z = tk.StringVar(value="2.0")  # 移動高さ（切削間の移動）
+        self.rapid_feed_rate = tk.StringVar(value="500")  # 早送り速度
+        self.plunge_feed_rate = tk.StringVar(value="50")  # プランジ速度（Z軸下降）
+        
         self.data = None  # Geometry または DrillData
 
 
@@ -231,15 +249,40 @@ class AltairCAMApp:
         ttk.Entry(param_frame, textvariable=config.feed_rate, width=8).grid(row=1, column=1, sticky=tk.W, pady=(5,0))
         ttk.Label(param_frame, text="mm/min").grid(row=1, column=2, sticky=tk.W, padx=(2,15), pady=(5,0))
         
+        # 詳細設定（折りたたみ可能）
+        detail_frame = ttk.LabelFrame(frame, text="⚙ 詳細設定", padding="5")
+        detail_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(5,0))
+        
+        # Safe Z（安全高さ）
+        ttk.Label(detail_frame, text="Safe Z:").grid(row=0, column=0, sticky=tk.W, padx=(0,5))
+        ttk.Entry(detail_frame, textvariable=config.safe_z, width=8).grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(detail_frame, text="mm").grid(row=0, column=2, sticky=tk.W, padx=(2,15))
+        
+        # Travel Z（移動高さ）
+        ttk.Label(detail_frame, text="Travel Z:").grid(row=0, column=3, sticky=tk.W, padx=(0,5))
+        ttk.Entry(detail_frame, textvariable=config.travel_z, width=8).grid(row=0, column=4, sticky=tk.W)
+        ttk.Label(detail_frame, text="mm").grid(row=0, column=5, sticky=tk.W, padx=(2,0))
+        
+        # Rapid feed rate（早送り速度）
+        ttk.Label(detail_frame, text="Rapid移動:").grid(row=1, column=0, sticky=tk.W, padx=(0,5), pady=(5,0))
+        ttk.Entry(detail_frame, textvariable=config.rapid_feed_rate, width=8).grid(row=1, column=1, sticky=tk.W, pady=(5,0))
+        ttk.Label(detail_frame, text="mm/min").grid(row=1, column=2, sticky=tk.W, padx=(2,15), pady=(5,0))
+        
+        # Plunge feed rate（プランジ速度）
+        ttk.Label(detail_frame, text="Z軸下降:").grid(row=1, column=3, sticky=tk.W, padx=(0,5), pady=(5,0))
+        ttk.Entry(detail_frame, textvariable=config.plunge_feed_rate, width=8).grid(row=1, column=4, sticky=tk.W, pady=(5,0))
+        ttk.Label(detail_frame, text="mm/min").grid(row=1, column=5, sticky=tk.W, padx=(2,0), pady=(5,0))
+        
         # ツールパス最適化（ドリルのみ）
+        current_row = 5
         if config.name == "Drill":
             ttk.Checkbutton(frame, text="✨ ツールパス最適化（移動距離を最小化）", 
-                          variable=config.optimize_toolpath).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=3)
+                          variable=config.optimize_toolpath).grid(row=current_row, column=0, columnspan=3, sticky=tk.W, pady=3)
+            current_row += 1
         
         # Gコード生成ボタン
-        button_row = 5 if config.name == "Drill" else 4
         ttk.Button(frame, text="📝 Gコード生成", 
-                  command=lambda: self._generate_gcode_for_file(config)).grid(row=button_row, column=0, columnspan=3, pady=5)
+                  command=lambda: self._generate_gcode_for_file(config)).grid(row=current_row, column=0, columnspan=3, pady=5)
     
     def _browse_file(self, config: FileConfig, entry: ttk.Entry, filetypes: list):
         """ファイルを参照"""
@@ -397,6 +440,12 @@ class AltairCAMApp:
             cut_depth = float(config.cut_depth.get())
             feed_rate = float(config.feed_rate.get())
             
+            # 詳細設定を取得
+            safe_z = float(config.safe_z.get())
+            travel_z = float(config.travel_z.get())
+            rapid_feed_rate = float(config.rapid_feed_rate.get())
+            plunge_feed_rate = float(config.plunge_feed_rate.get())
+            
             self._log(f"{config.name}のGコードを生成中...")
             
             # ツールパス生成
@@ -407,6 +456,10 @@ class AltairCAMApp:
             gcode_gen = GCodeGenerator()
             gcode_gen.cut_z = cut_depth
             gcode_gen.feed_rate = feed_rate
+            gcode_gen.safe_z = safe_z  # 安全高さ
+            gcode_gen.travel_z = travel_z  # 移動高さ
+            gcode_gen.rapid_feed_rate = rapid_feed_rate  # 早送り速度
+            gcode_gen.plunge_feed_rate = plunge_feed_rate  # プランジ速度
             
             all_gcode = []
             all_gcode.extend(gcode_gen.generate_header())
@@ -416,8 +469,18 @@ class AltairCAMApp:
                 # ガーバーデータ: アイソレーションルーティング
                 self._log("  アイソレーションルーティングを生成中...")
                 toolpaths = toolpath_gen.generate_isolation_routing(config.data)
-                for path in toolpaths:
-                    all_gcode.extend(gcode_gen.generate_line_path(path))
+                
+                # パス順序を最適化
+                optimize = config.optimize_toolpath.get() if hasattr(config, 'optimize_toolpath') else False
+                if optimize and toolpaths:
+                    self._log("  パス順序を最適化中...")
+                    toolpaths = toolpath_gen.optimize_path_order(toolpaths)
+                    self._log(f"  最適化完了")
+                
+                # パスを切削（隣接するパスは連続、離れたパスはZ上昇して移動）
+                if toolpaths:
+                    all_gcode.extend(gcode_gen.generate_continuous_paths(toolpaths))
+                    self._log(f"  {len(toolpaths)}個のパスを生成")
             
             elif isinstance(config.data, DrillData):
                 # ドリルデータ

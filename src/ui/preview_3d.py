@@ -177,6 +177,8 @@ class Preview3DWindow:
     def _draw_geometry_3d(self, geometry, z_level=0.0, color='blue', 
                          label='Geometry', linewidth=2):
         """幾何データを3Dで描画"""
+        import math
+        
         for i, line in enumerate(geometry.lines):
             self.ax.plot(
                 [line.start.x, line.end.x],
@@ -194,6 +196,37 @@ class Preview3DWindow:
             y = circle.center.y + circle.radius * np.sin(theta)
             z = np.full_like(x, z_level)
             self.ax.plot(x, y, z, color=color, linewidth=linewidth)
+        
+        # 円弧を描画
+        for arc in geometry.arcs:
+            # 半径を計算
+            dx = arc.start.x - arc.center.x
+            dy = arc.start.y - arc.center.y
+            radius = math.sqrt(dx*dx + dy*dy)
+            
+            if radius > 0.001:
+                # 開始角度と終了角度を計算
+                start_angle = math.atan2(arc.start.y - arc.center.y, arc.start.x - arc.center.x)
+                end_angle = math.atan2(arc.end.y - arc.center.y, arc.end.x - arc.center.x)
+                
+                # 円弧の角度範囲を計算
+                if arc.clockwise:
+                    # 時計回り
+                    if end_angle > start_angle:
+                        end_angle -= 2 * math.pi
+                    angles = [start_angle - t * (start_angle - end_angle) for t in [i/50 for i in range(51)]]
+                else:
+                    # 反時計回り
+                    if end_angle < start_angle:
+                        end_angle += 2 * math.pi
+                    angles = [start_angle + t * (end_angle - start_angle) for t in [i/50 for i in range(51)]]
+                
+                # 円弧の座標を計算
+                arc_x = [arc.center.x + radius * math.cos(angle) for angle in angles]
+                arc_y = [arc.center.y + radius * math.sin(angle) for angle in angles]
+                arc_z = [z_level] * len(arc_x)
+                
+                self.ax.plot(arc_x, arc_y, arc_z, color=color, linewidth=linewidth)
     
     def _draw_drill_holes_3d(self, drill_data):
         """ドリル穴を3Dで描画（円筒形）"""
