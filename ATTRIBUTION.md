@@ -5,7 +5,7 @@ AltairCAM is a PCB CNC tool derived from concepts and algorithms from the FlatCA
 ## FlatCAM License
 
 FlatCAM is released under the MIT License. For the original FlatCAM project, please see:
-https://github.com/jpcgt/FlatCAM
+http://flatcam.org/disclaimer
 
 **MIT License Text:**
 ```
