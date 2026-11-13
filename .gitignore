@@ -1,1 +1,5 @@
 FlatCAM/
+target/
+legacy_python/
+*.old
+*.new
