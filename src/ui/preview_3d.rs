@@ -103,8 +103,8 @@ impl Preview3DState {
 
         if response.dragged_by(egui::PointerButton::Primary) {
             let d = response.drag_delta();
-            self.yaw += d.x * 0.008;
-            self.pitch = (self.pitch + d.y * 0.008).clamp(-1.55, 1.55);
+            self.yaw += d.x * 0.005;
+            self.pitch = (self.pitch + d.y * 0.005).clamp(-1.55, 1.55);
         }
         if response.dragged_by(egui::PointerButton::Secondary)
             || response.dragged_by(egui::PointerButton::Middle)
@@ -114,7 +114,7 @@ impl Preview3DState {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.1 {
-                let factor = if scroll > 0.0 { 1.12 } else { 1.0 / 1.12 };
+                let factor = (scroll * 0.0025).clamp(-0.3, 0.3).exp();
                 self.zoom = (self.zoom * factor).clamp(0.3, 400.0);
             }
         }

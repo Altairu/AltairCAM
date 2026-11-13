@@ -198,7 +198,7 @@ impl SimulatorState {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.1 {
-                let factor = if scroll > 0.0 { 1.15 } else { 1.0 / 1.15 };
+                let factor = (scroll * 0.0025).clamp(-0.3, 0.3).exp();
                 self.zoom = (self.zoom * factor).clamp(0.2, 1000.0);
             }
         }
