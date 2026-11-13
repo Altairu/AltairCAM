@@ -85,7 +85,7 @@ impl AltairCamApp {
             preview_2d: Preview2DState::default(),
             preview_3d: Preview3DState::default(),
             simulator: SimulatorState::default(),
-            logs: vec![format!("AltairCAM v{} を起動しました。", env!("CARGO_PKG_VERSION"))],
+            logs: vec![format!("AltairCAM v{} を起動しました。", env!("APP_VERSION"))],
             show_help_dialog: false,
             show_about_dialog: false,
             update_dialog: None,
@@ -895,7 +895,7 @@ impl AltairCamApp {
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.heading("AltairCAM");
-                    ui.label(format!("バージョン: {}", env!("CARGO_PKG_VERSION")));
+                    ui.label(format!("バージョン: {}", env!("APP_VERSION")));
                     ui.label("Rust製 PCB CNC用 CAMソフトウェア");
                     ui.add_space(6.0);
                     ui.checkbox(&mut self.config.auto_check_updates, "起動時に自動更新を確認する");

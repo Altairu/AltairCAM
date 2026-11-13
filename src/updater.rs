@@ -53,7 +53,7 @@ pub fn cleanup_old_executable() {
 
 /// 最新バージョンを確認する
 pub fn check_for_updates() -> Result<Option<UpdateInfo>, String> {
-    let current_str = env!("CARGO_PKG_VERSION");
+    let current_str = env!("APP_VERSION");
     let current_ver = Version::parse(current_str)
         .map_err(|e| format!("現在のバージョン解析エラー: {}", e))?;
 
@@ -109,7 +109,7 @@ pub fn download_and_install_update(download_url: &str) -> Result<(), String> {
 
     // 新しいバイナリをダウンロード
     let mut response = ureq::get(download_url)
-        .header("User-Agent", &format!("AltairCAM/{}", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", &format!("AltairCAM/{}", env!("APP_VERSION")))
         .call()
         .map_err(|e| format!("更新ファイルのダウンロードに失敗しました: {}", e))?;
 

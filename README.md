@@ -46,8 +46,8 @@ cargo build --release
 `v` から始まるバージョンタグをプッシュすると、GitHub ActionsがWindows用の実行ファイルをビルドして自動でReleasesに公開します。
 
 ```bash
-git tag v3.0.0
-git push origin v3.0.0
+git tag v2.0.1
+git push origin v2.0.1
 ```
 
 ## ライセンス

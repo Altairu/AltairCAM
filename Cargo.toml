@@ -1,6 +1,6 @@
 [package]
 name = "altair_cam"
-version = "3.0.0"
+version = "2.0.1"
 edition = "2021"
 description = "PCB CNC CAM Software"
 authors = ["Altairu"]
