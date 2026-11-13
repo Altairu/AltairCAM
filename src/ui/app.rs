@@ -67,7 +67,7 @@ pub struct AltairCamApp {
 }
 
 impl AltairCamApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = AppProjectConfig::default_config_path()
             .and_then(|p| AppProjectConfig::load_from_file(p).ok())
             .unwrap_or_default();
@@ -95,7 +95,7 @@ impl AltairCamApp {
         };
 
         if app.config.auto_check_updates {
-            app.start_update_check(false);
+            app.start_update_check(false, cc.egui_ctx.clone());
         }
 
         app
@@ -114,7 +114,7 @@ impl AltairCamApp {
         }
     }
 
-    fn start_update_check(&mut self, manual: bool) {
+    fn start_update_check(&mut self, manual: bool, ctx: egui::Context) {
         if self.updating_in_progress {
             return;
         }
@@ -126,10 +126,11 @@ impl AltairCamApp {
         thread::spawn(move || {
             let res = updater::check_for_updates();
             let _ = tx.send(UpdateMessage::Checked(res, manual));
+            ctx.request_repaint();
         });
     }
 
-    fn start_update_install(&mut self, url: String) {
+    fn start_update_install(&mut self, url: String, ctx: egui::Context) {
         if self.updating_in_progress {
             return;
         }
@@ -140,6 +141,7 @@ impl AltairCamApp {
         thread::spawn(move || {
             if let Err(e) = updater::download_and_install_update(&url) {
                 let _ = tx.send(UpdateMessage::InstallFailed(e));
+                ctx.request_repaint();
             }
         });
     }
@@ -165,6 +167,7 @@ impl AltairCamApp {
                 UpdateMessage::Checked(Ok(None), manual) => {
                     if manual {
                         self.update_status_text = Some("最新バージョンです。".to_string());
+                        self.log("アップデート確認: 最新バージョンです。");
                     } else {
                         self.update_status_text = None;
                     }
@@ -172,6 +175,7 @@ impl AltairCamApp {
                 UpdateMessage::Checked(Err(e), manual) => {
                     if manual {
                         self.update_status_text = Some(format!("確認失敗: {}", e));
+                        self.log(format!("アップデート確認失敗: {}", e));
                     } else {
                         self.update_status_text = None;
                     }
@@ -505,7 +509,7 @@ impl eframe::App for AltairCamApp {
                         ui.close();
                     }
                     if ui.button("アップデートを確認").clicked() {
-                        self.start_update_check(true);
+                        self.start_update_check(true, ctx.clone());
                         ui.close();
                     }
                     ui.separator();
@@ -924,6 +928,10 @@ impl AltairCamApp {
                         ui.label(&info.release_notes);
                     });
                     ui.separator();
+                    if let Some(ref status) = self.update_status_text {
+                        ui.label(status);
+                        ui.add_space(4.0);
+                    }
                     ui.horizontal(|ui| {
                         if let Some(ref dl_url) = info.exe_download_url {
                             let btn_text = if self.updating_in_progress {
@@ -935,7 +943,7 @@ impl AltairCamApp {
                                 .add_enabled(!self.updating_in_progress, egui::Button::new(btn_text))
                                 .clicked()
                             {
-                                self.start_update_install(dl_url.clone());
+                                self.start_update_install(dl_url.clone(), ctx.clone());
                             }
                         }
                         ui.hyperlink_to("リリースページを開く", &info.html_url);

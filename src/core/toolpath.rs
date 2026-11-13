@@ -15,6 +15,27 @@ use crate::core::gerber::GerberParser;
 
 type ShapesF64 = Vec<Vec<Vec<[f64; 2]>>>;
 
+/// 輪郭の符号付き面積を計算する（正ならCCW、負ならCW）
+fn contour_signed_area(pts: &[[f64; 2]]) -> f64 {
+    if pts.len() < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    for i in 0..pts.len() {
+        let j = (i + 1) % pts.len();
+        area += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
+    }
+    area * 0.5
+}
+
+/// 輪郭を必ず反時計回り(CCW)に正規化する
+fn ensure_ccw(mut pts: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
+    if contour_signed_area(&pts) < 0.0 {
+        pts.reverse();
+    }
+    pts
+}
+
 pub struct ToolpathGenerator {
     pub tool_diameter: f64,
     pub arc_resolution: f64,
@@ -53,9 +74,14 @@ impl ToolpathGenerator {
                 .end_cap(LineCap::Round(0.25))
                 .line_join(LineJoin::Round(0.25));
             let stroked = path.stroke_as::<i64>(style, false);
-            match seg.polarity {
-                Polarity::Dark => dark_shapes.extend(stroked),
-                Polarity::Clear => clear_shapes.extend(stroked),
+            for mut shape in stroked {
+                if let Some(outer) = shape.first_mut() {
+                    *outer = ensure_ccw(std::mem::take(outer));
+                }
+                match seg.polarity {
+                    Polarity::Dark => dark_shapes.push(shape),
+                    Polarity::Clear => clear_shapes.push(shape),
+                }
             }
         }
 
@@ -76,9 +102,14 @@ impl ToolpathGenerator {
                     .end_cap(LineCap::Round(0.25))
                     .line_join(LineJoin::Round(0.25));
                 let stroked = coords.stroke_as::<i64>(style, false);
-                match arc.polarity {
-                    Polarity::Dark => dark_shapes.extend(stroked),
-                    Polarity::Clear => clear_shapes.extend(stroked),
+                for mut shape in stroked {
+                    if let Some(outer) = shape.first_mut() {
+                        *outer = ensure_ccw(std::mem::take(outer));
+                    }
+                    match arc.polarity {
+                        Polarity::Dark => dark_shapes.push(shape),
+                        Polarity::Clear => clear_shapes.push(shape),
+                    }
                 }
             }
         }
@@ -97,7 +128,7 @@ impl ToolpathGenerator {
                     circle.center.y + circle.radius * ang.sin(),
                 ]);
             }
-            let shape = vec![contour];
+            let shape = vec![ensure_ccw(contour)];
             match circle.polarity {
                 Polarity::Dark => dark_shapes.push(shape),
                 Polarity::Clear => clear_shapes.push(shape),
@@ -108,8 +139,7 @@ impl ToolpathGenerator {
         for poly in &geometry.polygons {
             if poly.points.len() >= 3 {
                 let contour: Vec<[f64; 2]> = poly.points.iter().map(|p| [p.x, p.y]).collect();
-                // 自己交差などをクリーン化するため一旦NonZeroルールでSubject解決してもよいが、まとめてUnion時に処理される
-                let shape = vec![contour];
+                let shape = vec![ensure_ccw(contour)];
                 match poly.polarity {
                     Polarity::Dark => dark_shapes.push(shape),
                     Polarity::Clear => clear_shapes.push(shape),
@@ -121,16 +151,18 @@ impl ToolpathGenerator {
             return Vec::new();
         }
 
-        // 全Dark図形を一括ユニオン
+        // 全Dark図形を一括ユニオン（すべてCCWなのでPositiveルールで純粋な和集合になる）
         let empty: ShapesF64 = Vec::new();
-        let mut unified = dark_shapes.overlay_as::<i64>(&empty, OverlayRule::Union, FillRule::NonZero);
+        let mut unified = dark_shapes.overlay_as::<i64>(&empty, OverlayRule::Union, FillRule::Positive);
 
-        // Clear図形があれば差し引く
+        // Clear図形があれば先にClear同士をユニオンしてから差し引く
         if !clear_shapes.is_empty() && !unified.is_empty() {
+            let unified_clear =
+                clear_shapes.overlay_as::<i64>(&empty, OverlayRule::Union, FillRule::Positive);
             unified = unified.overlay_as::<i64>(
-                &clear_shapes,
+                &unified_clear,
                 OverlayRule::Difference,
-                FillRule::NonZero,
+                FillRule::Positive,
             );
         }
 
@@ -546,19 +578,113 @@ mod tests {
     use crate::gcode::generator::{parse_gcode_for_sim, GCodeGenerator, GCodeSettings};
 
     #[test]
+    fn test_two_segments_and_outline() {
+        let s1 = [[0.0, 0.0], [10.0, 0.0]];
+        let s2 = [[0.0, 0.0], [0.0, 10.0]];
+        let style = StrokeStyle::new(2.0)
+            .start_cap(LineCap::Round(0.25))
+            .end_cap(LineCap::Round(0.25))
+            .line_join(LineJoin::Round(0.25));
+        let mut shapes: ShapesF64 = Vec::new();
+        shapes.extend(s1.stroke_as::<i64>(style.clone(), false));
+        shapes.extend(s2.stroke_as::<i64>(style, false));
+        let empty: ShapesF64 = Vec::new();
+        let unified = shapes.overlay_as::<i64>(&empty, OverlayRule::Union, FillRule::NonZero);
+        println!("unified shapes count: {}", unified.len());
+        for (i, s) in unified.iter().enumerate() {
+            println!("  unified shape {} contours: {}", i, s.len());
+            for (ci, c) in s.iter().enumerate() {
+                println!("    contour {} len: {}", ci, c.len());
+            }
+        }
+        let mut ostyle = OutlineStyle::new(0.1);
+        ostyle.join = LineJoin::Round(0.2);
+        let outlined = unified.outline_as::<i64>(&ostyle);
+        println!("outlined shapes count: {}", outlined.len());
+        for (i, s) in outlined.iter().enumerate() {
+            println!("  outlined shape {} contours: {}", i, s.len());
+            for (ci, c) in s.iter().enumerate() {
+                println!("    contour {} len: {}", ci, c.len());
+            }
+        }
+        assert_eq!(unified.len(), 1);
+        assert_eq!(unified[0].len(), 1, "2本の線分が穴なしで1つの塊になること");
+    }
+
+    #[test]
+    fn test_stroke_cap() {
+        let path = [[0.0, 0.0], [10.0, 0.0]];
+        let style = StrokeStyle::new(2.0)
+            .start_cap(LineCap::Round(0.25))
+            .end_cap(LineCap::Round(0.25))
+            .line_join(LineJoin::Round(0.25));
+        let stroked = path.stroke_as::<i64>(style, false);
+        println!("stroked shapes count: {}", stroked.len());
+        for (si, s) in stroked.iter().enumerate() {
+            println!("  shape {} contours: {}", si, s.len());
+            for (ci, c) in s.iter().enumerate() {
+                println!("    contour {} pts({}): {:?}", ci, c.len(), c);
+            }
+        }
+    }
+
+    #[test]
     fn test_sample_b_cu_pipeline() {
         let geo = GerberParser::parse_file("sample/SSP4-B_Cu.gbr").expect("B_Cu 読込失敗");
         assert!(!geo.segments.is_empty(), "線分が読み込まれていること");
         assert!(!geo.polygons.is_empty(), "ポリゴン（Outline8P等）が読み込まれていること");
 
         let gen = ToolpathGenerator::new(0.1);
+        let unified = gen.build_unified_copper_shapes(&geo);
+        let mut hole_count = 0;
+        let mut cw_outer = 0;
+        for shape in &unified {
+            if let Some(outer) = shape.first() {
+                if signed_area(outer) < 0.0 {
+                    cw_outer += 1;
+                }
+            }
+            hole_count += shape.len().saturating_sub(1);
+        }
+        println!(
+            "B_Cu unified shapes: {}, holes: {}, cw_outer: {}, segs: {}, arcs: {}, circles: {}, polys: {}",
+            unified.len(),
+            hole_count,
+            cw_outer,
+            geo.segments.len(),
+            geo.arcs.len(),
+            geo.circles.len(),
+            geo.polygons.len()
+        );
+        // 最初の5セグメントと最初の5ポリゴンの向きも確認
+        for (i, s) in geo.segments.iter().take(5).enumerate() {
+            println!("  seg {}: ({:.3},{:.3})->({:.3},{:.3}) w={:.3}", i, s.start.x, s.start.y, s.end.x, s.end.y, s.width);
+        }
+        for (i, p) in geo.polygons.iter().take(5).enumerate() {
+            let pts: Vec<[f64; 2]> = p.points.iter().map(|pt| [pt.x, pt.y]).collect();
+            println!("  poly {}: pts={} area={:.4}", i, pts.len(), signed_area(&pts));
+        }
+
+        assert_eq!(cw_outer, 0, "外周輪郭はすべてCCWであること");
+        assert!(hole_count <= 7, "重なり部分に不要な穴が生成されないこと (holes={})", hole_count);
+
         let paths = gen.generate_isolation_toolpaths(&geo, 1, 0.25, true);
+        println!("B_Cu generated toolpaths: {}", paths.len());
         assert!(!paths.is_empty(), "アイソレーションパスが生成されること");
         // 各パスが閉じていること
         for p in &paths {
             assert!(p.len() >= 3);
             assert!(p.first().unwrap().distance_to(p.last().unwrap()) < 1e-4);
         }
+    }
+
+    fn signed_area(pts: &[[f64; 2]]) -> f64 {
+        let mut a = 0.0;
+        for i in 0..pts.len() {
+            let j = (i + 1) % pts.len();
+            a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
+        }
+        a * 0.5
     }
 
     #[test]
