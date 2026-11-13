@@ -5,6 +5,61 @@ use eframe::egui;
 use crate::core::geometry::{Bounds, DrillData, Geometry, Point2, Polarity, Toolpath};
 use crate::core::gerber::GerberParser;
 
+struct CachedPoly {
+    points: Vec<Point2>,
+    indices: Vec<u32>,
+    polarity: Polarity,
+}
+
+#[derive(Default)]
+struct PolyMeshCache {
+    hash: u64,
+    polys: Vec<CachedPoly>,
+}
+
+impl PolyMeshCache {
+    fn update(&mut self, geo: &Geometry) {
+        let h = Self::compute_hash(geo);
+        if self.hash == h && !self.polys.is_empty() {
+            return;
+        }
+        self.hash = h;
+        self.polys.clear();
+
+        for poly in &geo.polygons {
+            if poly.points.len() < 3 {
+                continue;
+            }
+            let mut coords = Vec::with_capacity(poly.points.len() * 2);
+            for p in &poly.points {
+                coords.push(p.x);
+                coords.push(p.y);
+            }
+            let raw_indices = earcutr::earcut(&coords, &[], 2).unwrap_or_default();
+            let indices: Vec<u32> = raw_indices.into_iter().map(|i| i as u32).collect();
+            self.polys.push(CachedPoly {
+                points: poly.points.clone(),
+                indices,
+                polarity: poly.polarity,
+            });
+        }
+    }
+
+    fn compute_hash(geo: &Geometry) -> u64 {
+        let mut h: u64 = (geo.polygons.len() as u64).wrapping_mul(0x9e3779b97f4a7c15);
+        for p in &geo.polygons {
+            h = h.rotate_left(7) ^ (p.points.len() as u64);
+            if let Some(first) = p.points.first() {
+                h = h.wrapping_mul(0x517cc1b727220a95) ^ first.x.to_bits() ^ first.y.to_bits();
+            }
+            if let Some(last) = p.points.last() {
+                h = h.wrapping_mul(0x517cc1b727220a95) ^ last.x.to_bits() ^ last.y.to_bits();
+            }
+        }
+        h
+    }
+}
+
 pub struct Preview2DState {
     pub zoom: f32,           // px per mm
     pub pan: egui::Vec2,     // 画面中央からのオフセット (px)
@@ -15,6 +70,8 @@ pub struct Preview2DState {
     pub show_grid: bool,
     pub cursor_world: Option<Point2>,
     pub needs_fit: bool,
+    b_cu_cache: PolyMeshCache,
+    edge_cuts_cache: PolyMeshCache,
 }
 
 impl Default for Preview2DState {
@@ -29,6 +86,8 @@ impl Default for Preview2DState {
             show_grid: true,
             cursor_world: None,
             needs_fit: false,
+            b_cu_cache: PolyMeshCache::default(),
+            edge_cuts_cache: PolyMeshCache::default(),
         }
     }
 }
@@ -163,10 +222,12 @@ impl Preview2DState {
         // B_Cu 描画
         if self.show_b_cu {
             if let Some(geo) = b_cu {
+                self.b_cu_cache.update(geo);
                 self.draw_geometry(
                     &painter,
                     center,
                     geo,
+                    &self.b_cu_cache.polys,
                     egui::Color32::from_rgb(184, 92, 42),
                     egui::Color32::from_rgb(248, 249, 250),
                 );
@@ -176,10 +237,12 @@ impl Preview2DState {
         // Edge_Cuts 描画
         if self.show_edge_cuts {
             if let Some(geo) = edge_cuts {
+                self.edge_cuts_cache.update(geo);
                 self.draw_geometry(
                     &painter,
                     center,
                     geo,
+                    &self.edge_cuts_cache.polys,
                     egui::Color32::from_rgb(200, 140, 20),
                     egui::Color32::from_rgb(248, 249, 250),
                 );
@@ -272,11 +335,12 @@ impl Preview2DState {
         painter: &egui::Painter,
         center: egui::Pos2,
         geo: &Geometry,
+        cached_polys: &[CachedPoly],
         dark_color: egui::Color32,
         clear_color: egui::Color32,
     ) {
         // ポリゴン描画（外周線＋半透明塗りつぶし）
-        for poly in &geo.polygons {
+        for poly in cached_polys {
             if poly.points.len() < 3 {
                 continue;
             }
@@ -290,19 +354,24 @@ impl Preview2DState {
                 .iter()
                 .map(|&p| self.world_to_screen(p, center))
                 .collect();
-            let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 140);
-            if pts.len() <= 4 {
-                painter.add(egui::Shape::convex_polygon(
-                    pts,
-                    fill,
-                    egui::Stroke::new(1.0, base),
-                ));
-            } else {
-                painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.2, base)));
+            let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 120);
+            if !poly.indices.is_empty() {
+                let mut mesh = egui::Mesh::default();
+                mesh.vertices = pts
+                    .iter()
+                    .map(|&pos| egui::epaint::Vertex {
+                        pos,
+                        uv: egui::epaint::WHITE_UV,
+                        color: fill,
+                    })
+                    .collect();
+                mesh.indices = poly.indices.clone();
+                painter.add(egui::Shape::mesh(mesh));
             }
+            painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.0, base)));
         }
 
-        // 線分
+        // 線分（端点に丸キャップを描画して接続部の欠けを防ぐ）
         for seg in &geo.segments {
             let color = if seg.polarity == Polarity::Dark {
                 dark_color
@@ -313,6 +382,11 @@ impl Preview2DState {
             let p1 = self.world_to_screen(seg.end, center);
             let w = (seg.width as f32 * self.zoom).max(1.2);
             painter.line_segment([p0, p1], egui::Stroke::new(w, color));
+            if w > 2.0 {
+                let r = w * 0.5;
+                painter.circle_filled(p0, r, color);
+                painter.circle_filled(p1, r, color);
+            }
         }
 
         // 円弧
