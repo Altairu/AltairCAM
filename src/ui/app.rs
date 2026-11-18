@@ -12,6 +12,7 @@ use crate::core::gerber::GerberParser;
 use crate::core::mirror::{mirror_drill_data, mirror_geometry, MirrorAxis};
 use crate::core::toolpath::ToolpathGenerator;
 use crate::gcode::generator::{GCodeGenerator, GCodeSettings};
+use crate::ui::dialogs::{self, DialogsState, HelpTab};
 use crate::ui::preview_2d::Preview2DState;
 use crate::ui::preview_3d::Preview3DState;
 use crate::ui::simulator::SimulatorState;
@@ -58,8 +59,7 @@ pub struct AltairCamApp {
 
     // ログとダイアログ
     logs: Vec<String>,
-    show_help_dialog: bool,
-    show_about_dialog: bool,
+    dialogs: DialogsState,
     update_dialog: Option<UpdateInfo>,
     update_status_text: Option<String>,
     update_rx: Option<Receiver<UpdateMessage>>,
@@ -86,8 +86,7 @@ impl AltairCamApp {
             preview_3d: Preview3DState::default(),
             simulator: SimulatorState::default(),
             logs: vec![format!("AltairCAM v{} を起動しました。", env!("APP_VERSION"))],
-            show_help_dialog: false,
-            show_about_dialog: false,
+            dialogs: DialogsState::default(),
             update_dialog: None,
             update_status_text: None,
             update_rx: None,
@@ -504,8 +503,19 @@ impl eframe::App for AltairCamApp {
                 });
 
                 ui.menu_button("ヘルプ", |ui| {
-                    if ui.button("使い方").clicked() {
-                        self.show_help_dialog = true;
+                    if ui.button("使い方・基本操作").clicked() {
+                        self.dialogs.show_help = true;
+                        self.dialogs.help_tab = HelpTab::BasicUsage;
+                        ui.close();
+                    }
+                    if ui.button("パラメーター解説").clicked() {
+                        self.dialogs.show_help = true;
+                        self.dialogs.help_tab = HelpTab::Parameters;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("問題を報告 (GitHub Issues)...").clicked() {
+                        self.dialogs.issue_report.open = true;
                         ui.close();
                     }
                     if ui.button("アップデートを確認").clicked() {
@@ -513,8 +523,12 @@ impl eframe::App for AltairCamApp {
                         ui.close();
                     }
                     ui.separator();
+                    if ui.button("ライセンス・権利情報").clicked() {
+                        self.dialogs.show_license = true;
+                        ui.close();
+                    }
                     if ui.button("バージョン情報").clicked() {
-                        self.show_about_dialog = true;
+                        self.dialogs.show_about = true;
                         ui.close();
                     }
                 });
@@ -555,6 +569,16 @@ impl eframe::App for AltairCamApp {
                     ui.selectable_value(&mut self.active_layer_tab, LayerTab::BCu, "B_Cu (銅箔)");
                     ui.selectable_value(&mut self.active_layer_tab, LayerTab::EdgeCuts, "Edge_Cuts (外形)");
                     ui.selectable_value(&mut self.active_layer_tab, LayerTab::Drill, "Drill (ドリル)");
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("? パラメーターの意味")
+                        .on_hover_text("各パラメーターの意味・推奨値・注意点の一覧を開きます")
+                        .clicked()
+                    {
+                        self.dialogs.show_help = true;
+                        self.dialogs.help_tab = HelpTab::Parameters;
+                    }
                 });
                 ui.separator();
 
@@ -705,10 +729,14 @@ impl AltairCamApp {
     ) -> bool {
         let mut changed = false;
 
-        changed |= ui.checkbox(&mut cfg.enabled, "このレイヤーを有効にする").changed();
+        changed |= ui
+            .checkbox(&mut cfg.enabled, "このレイヤーを有効にする")
+            .on_hover_text("オフにするとプレビュー表示や一括Gコード出力の対象から外れます。")
+            .changed();
 
         ui.horizontal(|ui| {
-            ui.label("ファイル:");
+            ui.label("ファイル:")
+                .on_hover_text("読み込むガーバー (.gbr 等) またはドリル (.drl 等) ファイルのパスです。");
             changed |= ui
                 .add(egui::TextEdit::singleline(&mut cfg.filepath).desired_width(180.0))
                 .changed();
@@ -724,15 +752,18 @@ impl AltairCamApp {
         });
 
         ui.horizontal(|ui| {
-            ui.label("反転:");
+            ui.label("反転:")
+                .on_hover_text("基準点を中心に図形を反転します。裏面加工時はY軸またはX軸反転を使用します。");
             changed |= ui
                 .radio_value(&mut cfg.mirror_axis, MirrorAxis::None, "なし")
                 .changed();
             changed |= ui
                 .radio_value(&mut cfg.mirror_axis, MirrorAxis::X, "X軸")
+                .on_hover_text("上下反転します（水平線を軸に反転）。")
                 .changed();
             changed |= ui
                 .radio_value(&mut cfg.mirror_axis, MirrorAxis::Y, "Y軸")
+                .on_hover_text("左右反転します（垂直線を軸に反転）。裏面(B_Cu)加工でよく使われます。")
                 .changed();
         });
 
@@ -742,34 +773,43 @@ impl AltairCamApp {
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("ツール直径 (mm):");
+                ui.label("ツール直径 (mm):")
+                    .on_hover_text("使用するエンドミルやドリルビットの刃径です。B_Cuは0.1〜0.2mm、Edge_Cutsは0.8〜2.0mm、Drillは穴径に合わせます。");
                 changed |= ui
                     .add(egui::DragValue::new(&mut cfg.tool_diameter).speed(0.02).range(0.01..=10.0))
+                    .on_hover_text("使用するエンドミルやドリルビットの刃径 (mm)")
                     .changed();
                 ui.end_row();
 
-                ui.label("切削深さ (mm):");
+                ui.label("切削深さ (mm):")
+                    .on_hover_text("最終的なZ軸の切り込み深さです（マイナス値）。B_Cuは -0.05〜-0.1mm、Edge_Cuts/Drillは基板厚+余裕 (-1.6〜-1.8mm)。");
                 changed |= ui
                     .add(egui::DragValue::new(&mut cfg.cut_depth).speed(0.02).range(-10.0..=0.0))
+                    .on_hover_text("目標のZ切削深さ (mm, 0以下)")
                     .changed();
                 ui.end_row();
 
-                ui.label("1回切り込み深さ (mm):");
+                ui.label("1回切り込み深さ (mm):")
+                    .on_hover_text("多段切り込み時の1パスあたりの深さです。0にすると1回で目標深さまで削ります。外形カット時は0.3〜0.5mm推奨。");
                 changed |= ui
                     .add(egui::DragValue::new(&mut cfg.pass_depth).speed(0.02).range(0.0..=5.0))
                     .on_hover_text("0にすると1回で目標深さまで削ります。外形カット時は0.3〜0.5mm推奨。")
                     .changed();
                 ui.end_row();
 
-                ui.label("送り速度 (mm/min):");
+                ui.label("送り速度 (mm/min):")
+                    .on_hover_text("XY平面で切削しながら移動する速度です。目安: 50〜150 mm/min。速すぎると工具が折れる原因になります。");
                 changed |= ui
                     .add(egui::DragValue::new(&mut cfg.feed_rate).speed(2.0).range(1.0..=3000.0))
+                    .on_hover_text("切削時のXY送り速度 (mm/min)")
                     .changed();
                 ui.end_row();
 
-                ui.label("スピンドル (rpm):");
+                ui.label("スピンドル (rpm):")
+                    .on_hover_text("主軸の回転数 (Sコマンド) です。使用するCNCマシンと刃物に合わせて設定します。");
                 changed |= ui
                     .add(egui::DragValue::new(&mut cfg.spindle_speed).speed(100.0).range(0..=30000))
+                    .on_hover_text("スピンドル回転数 (rpm)")
                     .changed();
                 ui.end_row();
             });
@@ -782,46 +822,57 @@ impl AltairCamApp {
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("アイソレーション周回数:");
+                        ui.label("アイソレーション周回数:")
+                            .on_hover_text("銅箔パターンの周囲を何周削って絶縁溝を広げるかを指定します（1〜10周）。");
                         changed |= ui
                             .add(egui::DragValue::new(&mut cfg.isolation_passes).range(1..=10))
+                            .on_hover_text("銅箔パターン周囲の周回数 (1〜10)")
                             .changed();
                         ui.end_row();
 
-                        ui.label("パス重なり率:");
+                        ui.label("パス重なり率:")
+                            .on_hover_text("複数周回削る際の隣接パス同士の重なり割合 (0.0〜0.8) です。0.2〜0.3程度で削り残しを防ぎます。");
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut cfg.isolation_overlap)
                                     .speed(0.05)
                                     .range(0.0..=0.8),
                             )
+                            .on_hover_text("隣接パスの重なり率 (0.0〜0.8)")
                             .changed();
                         ui.end_row();
                     });
                 changed |= ui
                     .checkbox(&mut cfg.optimize_toolpath, "パス順序を最適化する")
+                    .on_hover_text("切削パス間の空走移動距離が短くなるように順序を並べ替えます。")
                     .changed();
             }
             LayerTab::EdgeCuts => {
                 ui.horizontal(|ui| {
-                    ui.label("カット位置:");
+                    ui.label("カット位置:")
+                        .on_hover_text("外形線に対してツール中心を通す位置を選びます。外側カットで基板寸法が設計通りになります。");
                     changed |= ui
                         .radio_value(&mut cfg.edge_cut_mode, EdgeCutMode::Outside, "外側")
+                        .on_hover_text("ツール半径分だけ外側を削り、完成基板の寸法を維持します。")
                         .changed();
                     changed |= ui
                         .radio_value(&mut cfg.edge_cut_mode, EdgeCutMode::Inside, "内側")
+                        .on_hover_text("ツール半径分だけ内側を削ります（窓抜き加工向け）。")
                         .changed();
                     changed |= ui
                         .radio_value(&mut cfg.edge_cut_mode, EdgeCutMode::OnPath, "線上")
+                        .on_hover_text("外形線の中心上をそのまま削ります。")
                         .changed();
                 });
                 changed |= ui
                     .checkbox(&mut cfg.optimize_toolpath, "パス順序を最適化する")
+                    .on_hover_text("複数の外形パスがある場合に移動距離が短くなる順で加工します。")
                     .changed();
             }
             LayerTab::Drill => {
                 changed |= ui
                     .checkbox(&mut cfg.optimize_toolpath, "穴あけ順序を最適化する")
+                    .on_hover_text("穴あけの移動順序を最適化し、移動距離と加工時間を短縮します。")
                     .changed();
             }
         }
@@ -834,35 +885,43 @@ impl AltairCamApp {
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Safe Z (mm):");
+                        ui.label("Safe Z (mm):")
+                            .on_hover_text("加工開始・終了時や安全退避時のZ高さです。クランプに干渉しない高さ（例: 5.0mm）を設定します。");
                         changed |= ui
                             .add(egui::DragValue::new(&mut cfg.safe_z).speed(0.5).range(0.5..=50.0))
+                            .on_hover_text("安全退避高さ Safe Z (mm)")
                             .changed();
                         ui.end_row();
 
-                        ui.label("Travel Z (mm):");
+                        ui.label("Travel Z (mm):")
+                            .on_hover_text("切削箇所から次の切削箇所へXY移動する際のZ退避高さです（例: 2.0mm）。");
                         changed |= ui
                             .add(egui::DragValue::new(&mut cfg.travel_z).speed(0.5).range(0.2..=30.0))
+                            .on_hover_text("移動時のZ退避高さ Travel Z (mm)")
                             .changed();
                         ui.end_row();
 
-                        ui.label("早送り速度 (mm/min):");
+                        ui.label("早送り速度 (mm/min):")
+                            .on_hover_text("空中移動時の速度です。");
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut cfg.rapid_feed_rate)
                                     .speed(10.0)
                                     .range(10.0..=5000.0),
                             )
+                            .on_hover_text("非切削移動時の早送り速度 (mm/min)")
                             .changed();
                         ui.end_row();
 
-                        ui.label("Z軸下降速度 (mm/min):");
+                        ui.label("Z軸下降速度 (mm/min):")
+                            .on_hover_text("Z軸を材料へ切り込む際（プランジ）の下降速度です。刃先保護のため送り速度より遅めを推奨します。");
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut cfg.plunge_feed_rate)
                                     .speed(2.0)
                                     .range(5.0..=1000.0),
                             )
+                            .on_hover_text("Z軸切り込み時の下降速度 (mm/min)")
                             .changed();
                         ui.end_row();
                     });
@@ -872,86 +931,21 @@ impl AltairCamApp {
     }
 
     fn render_dialogs(&mut self, ctx: &egui::Context) {
-        if self.show_help_dialog {
-            let mut open = true;
-            egui::Window::new("使い方")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("1. 各レイヤータブで KiCad などから出力したガーバー / ドリルファイルを選択します。");
-                    ui.label("2. 「すべて読み込み」を押すと2D/3Dプレビューとツールパスが表示されます。");
-                    ui.label("3. 必要に応じて「原点(0,0)合わせ」やツール径、切り込み深さを調整します。");
-                    ui.label("4. 「シミュレーションで確認」で動作を確認してから「Gコード出力」を実行します。");
-                    ui.add_space(8.0);
-                    ui.label("推奨加工順序: B_Cu (銅箔) -> Drill (穴あけ) -> Edge_Cuts (外形切り出し)");
-                });
-            if !open {
-                self.show_help_dialog = false;
-            }
-        }
-
-        if self.show_about_dialog {
-            let mut open = true;
-            egui::Window::new("バージョン情報")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.heading("AltairCAM");
-                    ui.label(format!("バージョン: {}", env!("APP_VERSION")));
-                    ui.label("Rust製 PCB CNC用 CAMソフトウェア");
-                    ui.add_space(6.0);
-                    ui.checkbox(&mut self.config.auto_check_updates, "起動時に自動更新を確認する");
-                    ui.add_space(6.0);
-                    ui.hyperlink_to("GitHub リポジトリ", "https://github.com/Altairu/AltairCAM");
-                });
-            if !open {
-                self.show_about_dialog = false;
-            }
-        }
-
-        if let Some(info) = self.update_dialog.clone() {
-            let mut open = true;
-            egui::Window::new("アップデートが利用可能です")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(true)
-                .default_width(420.0)
-                .show(ctx, |ui| {
-                    ui.label(format!(
-                        "現在: v{}  ->  最新: v{}",
-                        info.current_version, info.latest_version
-                    ));
-                    ui.separator();
-                    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                        ui.label(&info.release_notes);
-                    });
-                    ui.separator();
-                    if let Some(ref status) = self.update_status_text {
-                        ui.label(status);
-                        ui.add_space(4.0);
-                    }
-                    ui.horizontal(|ui| {
-                        if let Some(ref dl_url) = info.exe_download_url {
-                            let btn_text = if self.updating_in_progress {
-                                "更新中..."
-                            } else {
-                                "ダウンロードして更新"
-                            };
-                            if ui
-                                .add_enabled(!self.updating_in_progress, egui::Button::new(btn_text))
-                                .clicked()
-                            {
-                                self.start_update_install(dl_url.clone(), ctx.clone());
-                            }
-                        }
-                        ui.hyperlink_to("リリースページを開く", &info.html_url);
-                    });
-                });
-            if !open && !self.updating_in_progress {
-                self.update_dialog = None;
-            }
+        let mut install_url: Option<String> = None;
+        dialogs::render_all_dialogs(
+            ctx,
+            &mut self.dialogs,
+            &mut self.config,
+            &self.logs,
+            &mut self.update_dialog,
+            &self.update_status_text,
+            self.updating_in_progress,
+            &mut |url| {
+                install_url = Some(url);
+            },
+        );
+        if let Some(url) = install_url {
+            self.start_update_install(url, ctx.clone());
         }
     }
 }
