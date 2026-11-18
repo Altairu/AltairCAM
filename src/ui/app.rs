@@ -623,7 +623,7 @@ impl eframe::App for AltairCamApp {
                     }
                     ui.separator();
                     if ui.button("問題を報告 (GitHub Issues)...").clicked() {
-                        self.dialogs.issue_report.open = true;
+                        self.dialogs.issue_report.open_with_capture(&ctx);
                         ui.close();
                     }
                     if ui.button("アップデートを確認").clicked() {

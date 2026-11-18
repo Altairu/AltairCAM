@@ -153,8 +153,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "altair_cam"
-version = "2.0.9"
+version = "2.0.10"
 dependencies = [
+ "arboard",
  "earcutr",
  "eframe",
  "i_overlay",

@@ -1,5 +1,8 @@
 //! ヘルプ、ライセンス・権利情報、問題報告、バージョン情報ダイアログ
 
+use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
+
 use eframe::egui;
 
 use crate::config::AppProjectConfig;
@@ -63,6 +66,12 @@ pub struct IssueReportState {
     pub title: String,
     pub description: String,
     pub include_env_and_logs: bool,
+    pub include_screenshot: bool,
+    pub screenshot_image: Option<Arc<egui::ColorImage>>,
+    pub screenshot_texture: Option<egui::TextureHandle>,
+    pub screenshot_slot: Arc<Mutex<Option<Arc<egui::ColorImage>>>>,
+    pub pending_capture: bool,
+    pub waiting_capture_frames: u8,
     pub status_message: Option<String>,
 }
 
@@ -74,8 +83,30 @@ impl Default for IssueReportState {
             title: String::new(),
             description: String::new(),
             include_env_and_logs: true,
+            include_screenshot: true,
+            screenshot_image: None,
+            screenshot_texture: None,
+            screenshot_slot: Arc::new(Mutex::new(None)),
+            pending_capture: false,
+            waiting_capture_frames: 0,
             status_message: None,
         }
+    }
+}
+
+impl IssueReportState {
+    /// ダイアログを開くと同時に現在の画面のスクリーンショットを撮影予約する
+    pub fn open_with_capture(&mut self, ctx: &egui::Context) {
+        self.open = true;
+        self.pending_capture = true;
+        self.status_message = None;
+        ctx.request_repaint();
+    }
+
+    /// 現在の画面のスクリーンショットを再撮影する
+    pub fn request_recapture(&mut self, ctx: &egui::Context) {
+        self.pending_capture = true;
+        ctx.request_repaint();
     }
 }
 
@@ -120,6 +151,58 @@ fn url_encode(input: &str) -> String {
     out
 }
 
+/// egui::ColorImage を非乗算 RGBA バイト列へ変換する
+fn color_image_to_rgba_bytes(img: &egui::ColorImage) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(img.pixels.len() * 4);
+    for c in &img.pixels {
+        bytes.extend_from_slice(&c.to_srgba_unmultiplied());
+    }
+    bytes
+}
+
+/// スクリーンショット画像を OS クリップボードへコピーする
+fn copy_image_to_clipboard(img: &egui::ColorImage) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("クリップボードの初期化に失敗: {}", e))?;
+    let rgba = color_image_to_rgba_bytes(img);
+    let data = arboard::ImageData {
+        width: img.width(),
+        height: img.height(),
+        bytes: Cow::Owned(rgba),
+    };
+    clipboard
+        .set_image(data)
+        .map_err(|e| format!("画像のクリップボードコピーに失敗: {}", e))
+}
+
+/// 画像ファイルを読み込んで egui::ColorImage に変換する
+fn load_color_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, String> {
+    let dyn_img =
+        image::open(path).map_err(|e| format!("画像ファイルの読み込みに失敗しました: {}", e))?;
+    let rgba = dyn_img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        rgba.as_raw(),
+    ))
+}
+
+/// egui::ColorImage を PNG ファイルとして保存する
+fn save_color_image_to_png(
+    img: &egui::ColorImage,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let rgba = color_image_to_rgba_bytes(img);
+    image::save_buffer(
+        path,
+        &rgba,
+        img.width() as u32,
+        img.height() as u32,
+        image::ColorType::Rgba8,
+    )
+    .map_err(|e| format!("PNG ファイルの保存に失敗しました: {}", e))
+}
+
 /// 問題報告用の Markdown 本文を組み立てる
 fn build_issue_body(
     state: &IssueReportState,
@@ -136,6 +219,11 @@ fn build_issue_body(
     } else {
         body.push_str(state.description.trim());
         body.push_str("\n\n");
+    }
+
+    if state.include_screenshot && state.screenshot_image.is_some() {
+        body.push_str("### スクリーンショット\n");
+        body.push_str("（クリップボードにスクリーンショット画像をコピー済みです。この下に `Ctrl + V` で貼り付けてください）\n\n");
     }
 
     if state.include_env_and_logs {
@@ -508,7 +596,8 @@ fn render_license_dialog(ctx: &egui::Context, dialogs: &mut DialogsState) {
                             ("ureq", "HTTPクライアント (自動更新)", "MIT / Apache-2.0"),
                             ("serde / serde_json", "設定ファイルのシリアライズ", "MIT / Apache-2.0"),
                             ("semver", "バージョン比較", "MIT / Apache-2.0"),
-                            ("image", "アイコン画像デコード", "MIT / Apache-2.0"),
+                            ("image", "アイコン・スクリーンショット画像処理", "MIT / Apache-2.0"),
+                            ("arboard", "クリップボードへの画像コピー", "MIT / Apache-2.0"),
                             ("earcutr", "ポリゴン三角形分割 (3D表示)", "ISC"),
                         ];
                         egui::Grid::new("third_party_libs_grid")
@@ -543,7 +632,46 @@ fn render_issue_report_dialog(
     config: &AppProjectConfig,
     logs: &[String],
 ) {
-    if !dialogs.issue_report.open {
+    let state = &mut dialogs.issue_report;
+    if !state.open {
+        return;
+    }
+
+    // バックグラウンドのスクリーンショット撮影完了結果を受け取る
+    let received_img = state
+        .screenshot_slot
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take());
+    if let Some(img) = received_img {
+        let tex = ctx.load_texture(
+            "issue_screenshot_thumb",
+            (*img).clone(),
+            egui::TextureOptions::LINEAR,
+        );
+        state.screenshot_texture = Some(tex);
+        state.screenshot_image = Some(img);
+        state.waiting_capture_frames = 0;
+    }
+
+    // ダイアログ自身が映り込まないよう、ダイアログ非表示状態で1フレーム描画してキャプチャする
+    if state.pending_capture {
+        state.pending_capture = false;
+        state.waiting_capture_frames = 4;
+        let slot = state.screenshot_slot.clone();
+        let ctx_cb = ctx.clone();
+        ctx.request_screenshot(move |img| {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(img);
+            }
+            ctx_cb.request_repaint();
+        });
+        return;
+    }
+
+    if state.waiting_capture_frames > 0 {
+        state.waiting_capture_frames -= 1;
+        ctx.request_repaint();
         return;
     }
 
@@ -552,9 +680,8 @@ fn render_issue_report_dialog(
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_size([520.0, 440.0])
+        .default_size([560.0, 560.0])
         .show(ctx, |ui| {
-            let state = &mut dialogs.issue_report;
             ui.label("問題や要望を GitHub Issues に送信できます。");
             ui.label("「GitHub Issues で開く」を押すと、入力内容が入った状態でブラウザが開きます。");
             ui.add_space(6.0);
@@ -586,7 +713,7 @@ fn render_issue_report_dialog(
             ui.label("詳細 / 再現手順:");
             ui.add(
                 egui::TextEdit::multiline(&mut state.description)
-                    .desired_rows(7)
+                    .desired_rows(5)
                     .desired_width(f32::INFINITY)
                     .hint_text("発生した現象、再現手順、期待する動作などを記入してください。"),
             );
@@ -596,6 +723,105 @@ fn render_issue_report_dialog(
                 &mut state.include_env_and_logs,
                 "バージョン情報・レイヤー設定概要・直近のログを自動添付する",
             );
+
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.checkbox(
+                    &mut state.include_screenshot,
+                    "スクリーンショット画像を添付する（GitHub を開く際にクリップボードへ自動コピー）",
+                );
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("現在の画面を再キャプチャ")
+                        .on_hover_text("このダイアログを一時的に隠して現在のアプリ画面を撮影します")
+                        .clicked()
+                    {
+                        state.request_recapture(ctx);
+                    }
+                    if ui
+                        .button("画像ファイルを選択...")
+                        .on_hover_text("保存済みの PNG 画像ファイルを読み込みます")
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PNG 画像", &["png"])
+                            .pick_file()
+                        {
+                            match load_color_image_from_path(&path) {
+                                Ok(img) => {
+                                    let arc_img = Arc::new(img);
+                                    let tex = ctx.load_texture(
+                                        "issue_screenshot_thumb",
+                                        (*arc_img).clone(),
+                                        egui::TextureOptions::LINEAR,
+                                    );
+                                    state.screenshot_texture = Some(tex);
+                                    state.screenshot_image = Some(arc_img);
+                                    state.include_screenshot = true;
+                                    state.status_message = Some(format!(
+                                        "画像を読み込みました: {}",
+                                        path.display()
+                                    ));
+                                }
+                                Err(e) => state.status_message = Some(e),
+                            }
+                        }
+                    }
+                    if let Some(ref img) = state.screenshot_image {
+                        if ui.button("画像をクリップボードにコピー").clicked() {
+                            match copy_image_to_clipboard(img) {
+                                Ok(()) => {
+                                    state.status_message = Some(
+                                        "スクリーンショット画像をクリップボードにコピーしました。"
+                                            .to_string(),
+                                    );
+                                }
+                                Err(e) => state.status_message = Some(e),
+                            }
+                        }
+                        if ui.button("PNGとして保存...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name("altaircam_screenshot.png")
+                                .add_filter("PNG 画像", &["png"])
+                                .save_file()
+                            {
+                                match save_color_image_to_png(img, &path) {
+                                    Ok(()) => {
+                                        state.status_message = Some(format!(
+                                            "PNG を保存しました: {}",
+                                            path.display()
+                                        ));
+                                    }
+                                    Err(e) => state.status_message = Some(e),
+                                }
+                            }
+                        }
+                    }
+                });
+
+                if let (Some(ref tex), Some(ref img)) =
+                    (&state.screenshot_texture, &state.screenshot_image)
+                {
+                    ui.add_space(4.0);
+                    let max_w = 240.0_f32;
+                    let max_h = 125.0_f32;
+                    let raw = tex.size_vec2();
+                    let scale = (max_w / raw.x.max(1.0)).min(max_h / raw.y.max(1.0)).min(1.0);
+                    let disp = raw * scale;
+                    ui.horizontal(|ui| {
+                        ui.image(egui::load::SizedTexture::new(tex.id(), disp));
+                        ui.vertical(|ui| {
+                            ui.label(format!("解像度: {} x {} px", img.width(), img.height()));
+                            ui.label(
+                                "GitHub の本文欄で Ctrl + V を押すと画像をそのまま貼り付けられます。",
+                            );
+                        });
+                    });
+                } else {
+                    ui.label("スクリーンショットが未取得です。再キャプチャまたは画像ファイルを選択できます。");
+                }
+            });
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -631,11 +857,31 @@ fn render_issue_report_dialog(
                             url_encode(&body)
                         );
                     }
+
+                    let mut copied_img = false;
+                    let mut copy_err: Option<String> = None;
+                    if state.include_screenshot {
+                        if let Some(ref img) = state.screenshot_image {
+                            match copy_image_to_clipboard(img) {
+                                Ok(()) => copied_img = true,
+                                Err(e) => copy_err = Some(e),
+                            }
+                        }
+                    }
+
                     ctx.open_url(egui::OpenUrl::new_tab(url));
-                    state.status_message = Some(
+                    state.status_message = Some(if copied_img {
+                        "ブラウザを開き、スクリーンショット画像をクリップボードにコピーしました。GitHub の本文欄で Ctrl + V を押して画像を貼り付けてください。"
+                            .to_string()
+                    } else if let Some(err) = copy_err {
+                        format!(
+                            "ブラウザを開きましたが、画像のコピーに失敗しました ({})。「PNGとして保存...」から手動添付できます。",
+                            err
+                        )
+                    } else {
                         "ブラウザで GitHub Issues の作成ページを開きました。内容を確認して Submit してください。"
-                            .to_string(),
-                    );
+                            .to_string()
+                    });
                 }
 
                 if ui.button("報告内容をコピー").clicked() {
@@ -694,7 +940,8 @@ fn render_about_dialog(
                     dialogs.show_license = true;
                 }
                 if ui.button("問題を報告...").clicked() {
-                    dialogs.issue_report.open = true;
+                    dialogs.show_about = false;
+                    dialogs.issue_report.open_with_capture(ctx);
                 }
             });
             ui.add_space(4.0);
@@ -782,7 +1029,7 @@ mod tests {
             title: "テスト".to_string(),
             description: "再現手順テスト".to_string(),
             include_env_and_logs: true,
-            status_message: None,
+            ..Default::default()
         };
         let cfg = AppProjectConfig::default();
         let logs = vec!["log1".to_string(), "log2".to_string()];
@@ -791,5 +1038,27 @@ mod tests {
         assert!(body.contains("AltairCAM: v"));
         assert!(body.contains("log1"));
         assert!(body.contains("log2"));
+        assert!(!body.contains("### スクリーンショット"));
+    }
+
+    #[test]
+    fn test_build_issue_body_with_screenshot_and_rgba_bytes() {
+        let img = Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+            [2, 1],
+            &[10, 20, 30, 255, 40, 50, 60, 128],
+        ));
+        let rgba = color_image_to_rgba_bytes(&img);
+        assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 128]);
+
+        let state = IssueReportState {
+            open: true,
+            include_screenshot: true,
+            screenshot_image: Some(img),
+            ..Default::default()
+        };
+        let cfg = AppProjectConfig::default();
+        let body = build_issue_body(&state, &cfg, &[], 10);
+        assert!(body.contains("### スクリーンショット"));
+        assert!(body.contains("Ctrl + V"));
     }
 }
