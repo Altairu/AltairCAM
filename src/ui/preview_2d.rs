@@ -220,22 +220,31 @@ impl Preview2DState {
             self.draw_grid(&painter, rect, center);
         }
 
-        // 切削後イメージモード時の基板下地（残存銅箔のベース色）
-        if self.show_machined_preview && params.total_bounds.is_valid() {
-            let p_min = self.world_to_screen(
-                Point2::new(params.total_bounds.min_x, params.total_bounds.max_y),
-                center,
-            );
-            let p_max = self.world_to_screen(
-                Point2::new(params.total_bounds.max_x, params.total_bounds.min_y),
-                center,
-            );
-            let board_rect = egui::Rect::from_two_pos(p_min, p_max);
-            painter.rect_filled(
-                board_rect,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(196, 118, 56, 75),
-            );
+        // 切削後イメージモード時の基板下地（外形パスの外側まで余白を含めた生基板プレート）
+        if self.show_machined_preview {
+            let mut board_bounds = params.total_bounds;
+            for path in params.edge_paths {
+                for &pt in path {
+                    board_bounds.expand_point(pt);
+                }
+            }
+            if board_bounds.is_valid() {
+                let margin = (params.edge_tool_dia * 2.5).max(3.0);
+                let p_min = self.world_to_screen(
+                    Point2::new(board_bounds.min_x - margin, board_bounds.max_y + margin),
+                    center,
+                );
+                let p_max = self.world_to_screen(
+                    Point2::new(board_bounds.max_x + margin, board_bounds.min_y - margin),
+                    center,
+                );
+                let board_rect = egui::Rect::from_two_pos(p_min, p_max);
+                painter.rect_filled(
+                    board_rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(205, 135, 75, 95),
+                );
+            }
         }
 
         // 原点軸 (0,0)
@@ -285,10 +294,10 @@ impl Preview2DState {
             }
         }
 
-        // 切削後イメージ（実寸ツール直径幅で削られた基材露出溝）
+        // 切削後イメージ（実寸ツール直径幅で削られた基材露出溝・外形貫通スリット）
         if self.show_machined_preview {
-            let fr4_substrate = egui::Color32::from_rgb(225, 232, 215);
-            let cut_edge_bg = egui::Color32::from_rgb(244, 246, 242);
+            let fr4_substrate = egui::Color32::from_rgb(185, 205, 165);
+            let through_slot = egui::Color32::from_rgb(65, 72, 82);
             if self.show_b_cu {
                 for path in params.b_cu_paths {
                     self.draw_machined_stroke(
@@ -307,7 +316,7 @@ impl Preview2DState {
                         center,
                         path,
                         params.edge_tool_dia,
-                        cut_edge_bg,
+                        through_slot,
                     );
                 }
             }
@@ -318,7 +327,7 @@ impl Preview2DState {
                         center,
                         path,
                         params.drill_tool_dia,
-                        cut_edge_bg,
+                        through_slot,
                     );
                 }
             }

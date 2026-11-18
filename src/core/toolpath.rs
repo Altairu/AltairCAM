@@ -885,9 +885,6 @@ impl ToolpathGenerator {
             min_y: f64,
             max_x: f64,
             max_y: f64,
-            contour_id: usize,
-            edge_idx: usize,
-            contour_len: usize,
         }
 
         let mut contours_edges: Vec<Vec<EdgeSeg>> = Vec::new();
@@ -898,7 +895,6 @@ impl ToolpathGenerator {
                 if contour.len() < 3 {
                     continue;
                 }
-                let cid = contours_edges.len();
                 let n = contour.len();
                 let mut edges = Vec::with_capacity(n);
                 let mut c_min_x = f64::INFINITY;
@@ -924,9 +920,6 @@ impl ToolpathGenerator {
                         min_y,
                         max_x,
                         max_y,
-                        contour_id: cid,
-                        edge_idx: i,
-                        contour_len: n,
                     });
                 }
                 contours_edges.push(edges);
@@ -937,8 +930,10 @@ impl ToolpathGenerator {
         let mut min_clearance = f64::INFINITY;
         let cluster_radius_gap = (self.tool_diameter * 1.5).max(0.3);
 
+        // 異なる銅箔輪郭同士（別のネット・別パターン間）のクリアランスのみを検査し、
+        // 同一輪郭内の折れ曲がり角やパッド接続部の内角を誤検出しないようにする
         for c1 in 0..contours_edges.len() {
-            for c2 in c1..contours_edges.len() {
+            for c2 in (c1 + 1)..contours_edges.len() {
                 let threshold = min_clearance.max(self.tool_diameter);
                 let b1 = contour_bounds[c1];
                 let b2 = contour_bounds[c2];
@@ -950,16 +945,7 @@ impl ToolpathGenerator {
                 let edges2 = &contours_edges[c2];
 
                 for e1 in edges1 {
-                    let start_j = if c1 == c2 { e1.edge_idx + 1 } else { 0 };
-                    for e2 in &edges2[start_j..] {
-                        if e1.contour_id == e2.contour_id {
-                            let diff = e2.edge_idx - e1.edge_idx;
-                            let wrap_diff = e1.contour_len - diff;
-                            if diff.min(wrap_diff) <= 3 {
-                                continue;
-                            }
-                        }
-
+                    for e2 in edges2 {
                         let cur_thresh = min_clearance.max(self.tool_diameter);
                         if Self::aabb_distance(
                             [e1.min_x, e1.min_y, e1.max_x, e1.max_y],
@@ -1387,5 +1373,45 @@ mod tests {
         let lines = gcode_gen.generate_drill_and_mill_gcode(&plunge, &drill.slots, &mill_paths);
         let (_, stats) = parse_gcode_for_sim(&lines);
         assert!(stats.estimated_minutes > 0.0);
+    }
+
+    #[test]
+    fn test_drc_ignores_same_contour_inner_corners() {
+        let mut geo = Geometry::new();
+        // 円形パッドと折れ曲がった配線が一体になった1本の導体（同じ輪郭）
+        geo.circles.push(crate::core::geometry::CircleShape {
+            center: Point2::new(0.0, 0.0),
+            radius: 0.9,
+            polarity: Polarity::Dark,
+        });
+        geo.segments.push(crate::core::geometry::Segment {
+            start: Point2::new(0.0, 0.0),
+            end: Point2::new(5.0, 0.0),
+            width: 0.5,
+            polarity: Polarity::Dark,
+        });
+        geo.segments.push(crate::core::geometry::Segment {
+            start: Point2::new(5.0, 0.0),
+            end: Point2::new(5.0, 4.0),
+            width: 0.5,
+            polarity: Polarity::Dark,
+        });
+        // 十分に離れた別の導体（クリアランス > 1.0mm）
+        geo.segments.push(crate::core::geometry::Segment {
+            start: Point2::new(0.0, 5.0),
+            end: Point2::new(3.0, 5.0),
+            width: 0.5,
+            polarity: Polarity::Dark,
+        });
+
+        let gen = ToolpathGenerator::new(0.3);
+        let report = gen.run_drc(&geo, 0.3);
+        assert!(
+            report.uncut_bridges.is_empty(),
+            "同一導体のパッド接続部や曲がり角の内角を加工不能箇所として誤検出しないこと (検出数: {})",
+            report.uncut_bridges.len()
+        );
+        let min_c = report.min_clearance_mm.expect("異なる導体間の最小クリアランスが計測されること");
+        assert!(min_c > 0.5, "min_c={}", min_c);
     }
 }

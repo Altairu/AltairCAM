@@ -332,6 +332,10 @@ impl AltairCamApp {
     }
 
     fn run_b_cu_drc(&mut self) {
+        if !self.config.b_cu.drc_enabled {
+            self.drc_report = None;
+            return;
+        }
         if let Some(ref g) = self.b_cu_data {
             let gen = ToolpathGenerator::new(self.config.b_cu.tool_diameter);
             let report = gen.run_drc(g, self.config.b_cu.drc_min_trace_width);
@@ -967,13 +971,27 @@ impl AltairCamApp {
             ui.horizontal(|ui| {
                 ui.strong("DRC チェック結果 (B_Cu)");
                 if ui
-                    .small_button("再チェック")
-                    .on_hover_text("現在のツール径と基準値でクリアランス・細線を再検査します")
-                    .clicked()
+                    .checkbox(&mut self.config.b_cu.drc_enabled, "有効")
+                    .on_hover_text("チェックを外すと DRC 検査と警告表示をオフにできます")
+                    .changed()
+                {
+                    self.save_default_config();
+                    self.run_b_cu_drc();
+                }
+                if self.config.b_cu.drc_enabled
+                    && ui
+                        .small_button("再チェック")
+                        .on_hover_text("現在のツール径と基準値でクリアランス・細線を再検査します")
+                        .clicked()
                 {
                     self.run_b_cu_drc();
                 }
             });
+
+            if !self.config.b_cu.drc_enabled {
+                ui.label("DRC チェックは無効になっています。");
+                return;
+            }
 
             if let Some(ref rep) = self.drc_report {
                 let width_str = rep

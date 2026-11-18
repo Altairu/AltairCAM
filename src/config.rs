@@ -42,6 +42,10 @@ fn default_min_trace_width() -> f64 {
     0.15
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// 工具および切削条件のプリセット
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolPreset {
@@ -177,6 +181,8 @@ pub struct LayerConfig {
     pub mill_holes: bool,        // Drill用: ツール径より大きい穴をエンドミルでくり抜く
     #[serde(default = "default_min_trace_width")]
     pub drc_min_trace_width: f64, // B_Cu用: DRC最小許容パターン幅 (mm)
+    #[serde(default = "default_true")]
+    pub drc_enabled: bool,       // B_Cu用: DRCチェックを有効にする
 }
 
 impl LayerConfig {
@@ -217,6 +223,7 @@ impl LayerConfig {
             edge_gap_size: default_edge_gap_size(),
             mill_holes: false,
             drc_min_trace_width: default_min_trace_width(),
+            drc_enabled: true,
         }
     }
 
@@ -244,6 +251,7 @@ impl LayerConfig {
             edge_gap_size: default_edge_gap_size(),
             mill_holes: false,
             drc_min_trace_width: default_min_trace_width(),
+            drc_enabled: true,
         }
     }
 
@@ -271,6 +279,7 @@ impl LayerConfig {
             edge_gap_size: default_edge_gap_size(),
             mill_holes: false,
             drc_min_trace_width: default_min_trace_width(),
+            drc_enabled: true,
         }
     }
 }
@@ -400,6 +409,7 @@ mod tests {
         assert_eq!(cfg.edge_cuts.edge_gap_mode, EdgeGapMode::None);
         assert!((cfg.edge_cuts.edge_gap_size - 2.0).abs() < 1e-6);
         assert!(!cfg.drill.mill_holes);
+        assert!(cfg.b_cu.drc_enabled);
 
         let preset = cfg
             .presets
