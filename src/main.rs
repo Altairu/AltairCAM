@@ -17,11 +17,11 @@ fn setup_japanese_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     let candidates = [
+        r"C:\Windows\Fonts\BIZ-UDGothicR.ttc",
+        r"C:\Windows\Fonts\meiryo.ttc",
         r"C:\Windows\Fonts\YuGothM.ttc",
         r"C:\Windows\Fonts\YuGothR.ttc",
-        r"C:\Windows\Fonts\meiryo.ttc",
         r"C:\Windows\Fonts\msgothic.ttc",
-        r"C:\Windows\Fonts\BIZ-UDGothicR.ttc",
     ];
 
     for path in &candidates {
@@ -31,11 +31,12 @@ fn setup_japanese_fonts(ctx: &egui::Context) {
                     "jp_font".to_owned(),
                     Arc::new(egui::FontData::from_owned(data)),
                 );
+                // 英数字と日本語で別フォントが混在してベースラインがずれるのを防ぐため先頭に挿入する
                 if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    vec.push("jp_font".to_owned());
+                    vec.insert(0, "jp_font".to_owned());
                 }
                 if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    vec.push("jp_font".to_owned());
+                    vec.insert(0, "jp_font".to_owned());
                 }
                 break;
             }
