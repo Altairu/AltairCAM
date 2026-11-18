@@ -582,8 +582,28 @@ impl eframe::App for AltairCamApp {
                 });
                 ui.separator();
 
+                // ログ領域を先に下部に確保し、設定エリアとレイアウトが干渉しないようにする
+                egui::Panel::bottom("control_log_panel")
+                    .resizable(true)
+                    .default_size(130.0)
+                    .size_range(70.0..=280.0)
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.label("ログ");
+                        egui::ScrollArea::vertical()
+                            .id_salt("log_scroll_area")
+                            .stick_to_bottom(true)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for line in &self.logs {
+                                    ui.label(line);
+                                }
+                            });
+                    });
+
                 egui::ScrollArea::vertical()
-                    .max_height(ui.available_height() - 140.0)
+                    .id_salt("layer_settings_scroll_area")
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let tab = self.active_layer_tab;
                         let changed = match tab {
@@ -633,17 +653,6 @@ impl eframe::App for AltairCamApp {
                                 }
                             }
                         });
-                    });
-
-                ui.separator();
-                ui.label("ログ");
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .max_height(110.0)
-                    .show(ui, |ui| {
-                        for line in &self.logs {
-                            ui.label(line);
-                        }
                     });
             });
 
