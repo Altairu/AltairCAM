@@ -10,6 +10,8 @@ pub struct SimulatorState {
     pub segments: Vec<SimSegment>,
     pub stats: GCodeStats,
     pub source_label: String,
+    pub tool_diameter: f64,
+    pub show_true_width: bool,
     pub playing: bool,
     pub current_step: usize,
     pub speed_steps_per_sec: f32,
@@ -27,6 +29,8 @@ impl Default for SimulatorState {
             segments: Vec::new(),
             stats: GCodeStats::default(),
             source_label: "未読込".to_string(),
+            tool_diameter: 0.2,
+            show_true_width: true,
             playing: false,
             current_step: 0,
             speed_steps_per_sec: 40.0,
@@ -41,6 +45,16 @@ impl Default for SimulatorState {
 }
 
 impl SimulatorState {
+    pub fn load_gcode_lines_with_tool(
+        &mut self,
+        label: &str,
+        lines: &[String],
+        tool_diameter: f64,
+    ) {
+        self.tool_diameter = tool_diameter.max(0.05);
+        self.load_gcode_lines(label, lines);
+    }
+
     pub fn load_gcode_lines(&mut self, label: &str, lines: &[String]) {
         let (segs, stats) = parse_gcode_for_sim(lines);
         let mut b = Bounds::empty();
@@ -126,6 +140,8 @@ impl SimulatorState {
             ui.label("速度:");
             ui.add(egui::Slider::new(&mut self.speed_steps_per_sec, 5.0..=500.0).logarithmic(true));
             ui.checkbox(&mut self.show_rapid, "早送り線を表示");
+            ui.checkbox(&mut self.show_true_width, "実寸ツール幅で表示")
+                .on_hover_text("ツール直径に応じた実際の切削幅で軌跡を表示します");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Gコードファイルを開く...").clicked() {
@@ -211,7 +227,23 @@ impl SimulatorState {
             1.0,
             egui::Color32::from_rgba_unmultiplied(210, 80, 80, 110),
         );
-        let cut_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(30, 100, 200));
+        let cut_width = if self.show_true_width {
+            (self.tool_diameter as f32 * self.zoom).max(1.5)
+        } else {
+            1.5
+        };
+        let cut_color = if self.show_true_width {
+            egui::Color32::from_rgba_unmultiplied(30, 100, 200, 180)
+        } else {
+            egui::Color32::from_rgb(30, 100, 200)
+        };
+        let cut_stroke = egui::Stroke::new(cut_width, cut_color);
+        let cut_radius = cut_width * 0.5;
+        let plunge_radius = if self.show_true_width {
+            cut_radius.max(2.0)
+        } else {
+            2.0
+        };
         let future_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(215, 218, 222));
 
         // 未実行の切削パスを薄く背景描画
@@ -235,9 +267,13 @@ impl SimulatorState {
                 }
                 MoveKind::Cut => {
                     painter.line_segment([p0, p1], cut_stroke);
+                    if self.show_true_width && cut_radius > 1.2 {
+                        painter.circle_filled(p0, cut_radius, cut_color);
+                        painter.circle_filled(p1, cut_radius, cut_color);
+                    }
                 }
                 MoveKind::Plunge => {
-                    painter.circle_filled(p1, 2.0, egui::Color32::from_rgb(180, 60, 20));
+                    painter.circle_filled(p1, plunge_radius, egui::Color32::from_rgb(180, 60, 20));
                 }
             }
         }

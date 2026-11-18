@@ -4,6 +4,23 @@ use eframe::egui;
 
 use crate::core::geometry::{Bounds, DrillData, Geometry, Point2, Polarity, Toolpath};
 use crate::core::gerber::GerberParser;
+use crate::core::toolpath::DrcViolation;
+
+/// 2D プレビュー描画に必要なデータ一式
+pub struct Preview2DParams<'a> {
+    pub b_cu: Option<&'a Geometry>,
+    pub edge_cuts: Option<&'a Geometry>,
+    pub drill: Option<&'a DrillData>,
+    pub b_cu_paths: &'a [Toolpath],
+    pub edge_paths: &'a [Toolpath],
+    pub drill_order: &'a [Point2],
+    pub drill_mill_paths: &'a [Toolpath],
+    pub b_cu_tool_dia: f64,
+    pub edge_tool_dia: f64,
+    pub drill_tool_dia: f64,
+    pub drc_violations: &'a [DrcViolation],
+    pub total_bounds: Bounds,
+}
 
 struct CachedPoly {
     points: Vec<Point2>,
@@ -67,6 +84,8 @@ pub struct Preview2DState {
     pub show_edge_cuts: bool,
     pub show_drill: bool,
     pub show_toolpaths: bool,
+    pub show_machined_preview: bool,
+    pub show_drc_warnings: bool,
     pub show_grid: bool,
     pub cursor_world: Option<Point2>,
     pub needs_fit: bool,
@@ -83,6 +102,8 @@ impl Default for Preview2DState {
             show_edge_cuts: true,
             show_drill: true,
             show_toolpaths: true,
+            show_machined_preview: false,
+            show_drc_warnings: true,
             show_grid: true,
             cursor_world: None,
             needs_fit: false,
@@ -123,25 +144,18 @@ impl Preview2DState {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        b_cu: Option<&Geometry>,
-        edge_cuts: Option<&Geometry>,
-        drill: Option<&DrillData>,
-        b_cu_paths: &[Toolpath],
-        edge_paths: &[Toolpath],
-        drill_order: &[Point2],
-        total_bounds: Bounds,
-    ) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, params: Preview2DParams<'_>) {
         // ツールバー
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.show_b_cu, "B_Cu");
             ui.checkbox(&mut self.show_edge_cuts, "Edge_Cuts");
             ui.checkbox(&mut self.show_drill, "Drill");
             ui.separator();
             ui.checkbox(&mut self.show_toolpaths, "ツールパス");
+            ui.checkbox(&mut self.show_machined_preview, "切削後イメージ")
+                .on_hover_text("ツール直径の実寸幅で削られた溝と加工後の基板イメージを表示します");
+            ui.checkbox(&mut self.show_drc_warnings, "DRC警告")
+                .on_hover_text("ツール径に対して狭すぎる箇所や細線の警告位置を表示します");
             ui.checkbox(&mut self.show_grid, "グリッド");
             ui.separator();
             if ui.button("全体表示").clicked() {
@@ -161,7 +175,7 @@ impl Preview2DState {
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
         if self.needs_fit {
-            self.fit_bounds(total_bounds, rect);
+            self.fit_bounds(params.total_bounds, rect);
         }
 
         let center = rect.center();
@@ -206,22 +220,44 @@ impl Preview2DState {
             self.draw_grid(&painter, rect, center);
         }
 
-        // 原点軸 (0,0)
-        let origin_s = self.world_to_screen(Point2::new(0.0, 0.0), center);
-        if rect.contains(origin_s) || true {
-            painter.line_segment(
-                [egui::pos2(rect.left(), origin_s.y), egui::pos2(rect.right(), origin_s.y)],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(200, 60, 60, 110)),
+        // 切削後イメージモード時の基板下地（残存銅箔のベース色）
+        if self.show_machined_preview && params.total_bounds.is_valid() {
+            let p_min = self.world_to_screen(
+                Point2::new(params.total_bounds.min_x, params.total_bounds.max_y),
+                center,
             );
-            painter.line_segment(
-                [egui::pos2(origin_s.x, rect.top()), egui::pos2(origin_s.x, rect.bottom())],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 150, 60, 110)),
+            let p_max = self.world_to_screen(
+                Point2::new(params.total_bounds.max_x, params.total_bounds.min_y),
+                center,
+            );
+            let board_rect = egui::Rect::from_two_pos(p_min, p_max);
+            painter.rect_filled(
+                board_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(196, 118, 56, 75),
             );
         }
 
+        // 原点軸 (0,0)
+        let origin_s = self.world_to_screen(Point2::new(0.0, 0.0), center);
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), origin_s.y),
+                egui::pos2(rect.right(), origin_s.y),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(200, 60, 60, 110)),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(origin_s.x, rect.top()),
+                egui::pos2(origin_s.x, rect.bottom()),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 150, 60, 110)),
+        );
+
         // B_Cu 描画
         if self.show_b_cu {
-            if let Some(geo) = b_cu {
+            if let Some(geo) = params.b_cu {
                 self.b_cu_cache.update(geo);
                 self.draw_geometry(
                     &painter,
@@ -236,7 +272,7 @@ impl Preview2DState {
 
         // Edge_Cuts 描画
         if self.show_edge_cuts {
-            if let Some(geo) = edge_cuts {
+            if let Some(geo) = params.edge_cuts {
                 self.edge_cuts_cache.update(geo);
                 self.draw_geometry(
                     &painter,
@@ -249,10 +285,53 @@ impl Preview2DState {
             }
         }
 
+        // 切削後イメージ（実寸ツール直径幅で削られた基材露出溝）
+        if self.show_machined_preview {
+            let fr4_substrate = egui::Color32::from_rgb(225, 232, 215);
+            let cut_edge_bg = egui::Color32::from_rgb(244, 246, 242);
+            if self.show_b_cu {
+                for path in params.b_cu_paths {
+                    self.draw_machined_stroke(
+                        &painter,
+                        center,
+                        path,
+                        params.b_cu_tool_dia,
+                        fr4_substrate,
+                    );
+                }
+            }
+            if self.show_edge_cuts {
+                for path in params.edge_paths {
+                    self.draw_machined_stroke(
+                        &painter,
+                        center,
+                        path,
+                        params.edge_tool_dia,
+                        cut_edge_bg,
+                    );
+                }
+            }
+            if self.show_drill {
+                for path in params.drill_mill_paths {
+                    self.draw_machined_stroke(
+                        &painter,
+                        center,
+                        path,
+                        params.drill_tool_dia,
+                        cut_edge_bg,
+                    );
+                }
+            }
+        }
+
         // Drill 描画
         if self.show_drill {
-            if let Some(d) = drill {
-                let hole_fill = egui::Color32::from_rgb(55, 110, 180);
+            if let Some(d) = params.drill {
+                let hole_fill = if self.show_machined_preview {
+                    egui::Color32::from_rgb(45, 55, 65)
+                } else {
+                    egui::Color32::from_rgb(55, 110, 180)
+                };
                 let hole_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 65, 120));
                 for h in &d.holes {
                     let pos = self.world_to_screen(h.position, center);
@@ -272,22 +351,106 @@ impl Preview2DState {
         if self.show_toolpaths {
             if self.show_b_cu {
                 let stroke = egui::Stroke::new(1.3, egui::Color32::from_rgb(16, 130, 85));
-                for path in b_cu_paths {
+                for path in params.b_cu_paths {
                     self.draw_polyline(&painter, center, path, stroke);
                 }
             }
             if self.show_edge_cuts {
                 let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(140, 50, 160));
-                for path in edge_paths {
+                for path in params.edge_paths {
                     self.draw_polyline(&painter, center, path, stroke);
                 }
             }
-            if self.show_drill && drill_order.len() >= 2 {
-                let stroke = egui::Stroke::new(
-                    1.0,
-                    egui::Color32::from_rgba_unmultiplied(40, 120, 210, 140),
+            if self.show_drill {
+                if params.drill_order.len() >= 2 {
+                    let stroke = egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(40, 120, 210, 140),
+                    );
+                    self.draw_polyline(&painter, center, params.drill_order, stroke);
+                }
+                let mill_stroke = egui::Stroke::new(1.2, egui::Color32::from_rgb(20, 130, 190));
+                for path in params.drill_mill_paths {
+                    self.draw_polyline(&painter, center, path, mill_stroke);
+                }
+            }
+        }
+
+        // DRC 警告マーカー描画
+        if self.show_drc_warnings && !params.drc_violations.is_empty() {
+            let warn_stroke = egui::Stroke::new(1.8, egui::Color32::from_rgb(220, 35, 35));
+            let warn_fill = egui::Color32::from_rgba_unmultiplied(230, 40, 40, 55);
+            let mut hovered_desc: Option<&str> = None;
+            let mut best_hover_px = 18.0_f32;
+
+            for v in params.drc_violations {
+                let pos = self.world_to_screen(v.position, center);
+                let r = ((v.diameter * 0.5) as f32 * self.zoom).clamp(5.0, 16.0);
+                painter.circle(pos, r, warn_fill, warn_stroke);
+                painter.line_segment(
+                    [egui::pos2(pos.x - 4.0, pos.y), egui::pos2(pos.x + 4.0, pos.y)],
+                    warn_stroke,
                 );
-                self.draw_polyline(&painter, center, drill_order, stroke);
+                painter.line_segment(
+                    [egui::pos2(pos.x, pos.y - 4.0), egui::pos2(pos.x, pos.y + 4.0)],
+                    warn_stroke,
+                );
+
+                if let Some(mp) = response.hover_pos() {
+                    let dist_px = mp.distance(pos);
+                    if dist_px <= r.max(10.0) && dist_px < best_hover_px {
+                        best_hover_px = dist_px;
+                        hovered_desc = Some(&v.description);
+                    }
+                }
+            }
+
+            if let Some(desc) = hovered_desc {
+                if let Some(mp) = response.hover_pos() {
+                    let text_pos = egui::pos2(mp.x + 12.0, mp.y - 12.0);
+                    let galley = painter.layout_no_wrap(
+                        desc.to_string(),
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::WHITE,
+                    );
+                    let bg_rect = egui::Rect::from_min_size(
+                        text_pos - egui::vec2(4.0, 2.0),
+                        galley.size() + egui::vec2(8.0, 4.0),
+                    );
+                    painter.rect_filled(
+                        bg_rect,
+                        3.0,
+                        egui::Color32::from_rgba_unmultiplied(30, 30, 35, 220),
+                    );
+                    painter.galley(text_pos, galley, egui::Color32::WHITE);
+                }
+            }
+        }
+    }
+
+    /// 実寸ツール幅で丸キャップ付き切削溝を描画する
+    fn draw_machined_stroke(
+        &self,
+        painter: &egui::Painter,
+        center: egui::Pos2,
+        pts: &[Point2],
+        tool_diameter: f64,
+        color: egui::Color32,
+    ) {
+        if pts.len() < 2 {
+            return;
+        }
+        let w = (tool_diameter as f32 * self.zoom).max(1.5);
+        let r = w * 0.5;
+        let stroke = egui::Stroke::new(w, color);
+        let screen_pts: Vec<egui::Pos2> = pts
+            .iter()
+            .map(|&p| self.world_to_screen(p, center))
+            .collect();
+        painter.add(egui::Shape::line(screen_pts.clone(), stroke));
+        if r > 1.2 {
+            for p in screen_pts {
+                painter.circle_filled(p, r, color);
             }
         }
     }

@@ -9,7 +9,7 @@ use i_overlay::mesh::float::outline::offset::OutlineOffset;
 use i_overlay::mesh::float::stroke::offset::StrokeOffset;
 use i_overlay::mesh::float::style::{LineCap, LineJoin, OutlineStyle, StrokeStyle};
 
-use crate::config::EdgeCutMode;
+use crate::config::{EdgeCutMode, EdgeGapMode};
 use crate::core::geometry::{DrillData, DrillHole, Geometry, Point2, Polarity, Toolpath};
 use crate::core::gerber::GerberParser;
 
@@ -34,6 +34,32 @@ fn ensure_ccw(mut pts: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
         pts.reverse();
     }
     pts
+}
+
+/// DRC（デザインルール / 加工可能性チェック）の検出箇所
+#[derive(Debug, Clone)]
+pub struct DrcViolation {
+    pub position: Point2,
+    pub diameter: f64,
+    pub description: String,
+}
+
+/// DRC 検査結果サマリー
+#[derive(Debug, Clone, Default)]
+pub struct DrcReport {
+    pub min_trace_width_mm: Option<f64>,
+    pub min_clearance_mm: Option<f64>,
+    pub uncut_bridges: Vec<DrcViolation>,
+    pub narrow_traces: Vec<DrcViolation>,
+}
+
+impl DrcReport {
+    /// 表示用の全警告リスト（未絶縁ブリッジと細線警告）を返す
+    pub fn all_violations(&self) -> Vec<DrcViolation> {
+        let mut all = self.uncut_bridges.clone();
+        all.extend(self.narrow_traces.clone());
+        all
+    }
 }
 
 pub struct ToolpathGenerator {
@@ -216,11 +242,32 @@ impl ToolpathGenerator {
         toolpaths
     }
 
-    /// 基板外形（Edge_Cuts）専用ツールパス生成
+    /// 基板外形（Edge_Cuts）専用ツールパス生成（既存互換用）
+    #[allow(dead_code)]
     pub fn generate_edge_cuts_toolpaths(
         &self,
         geometry: &Geometry,
         mode: EdgeCutMode,
+        optimize: bool,
+    ) -> Vec<Toolpath> {
+        self.generate_edge_cuts_toolpaths_with_options(
+            geometry,
+            mode,
+            0.0,
+            EdgeGapMode::None,
+            0.0,
+            optimize,
+        )
+    }
+
+    /// 基板外形（Edge_Cuts）専用ツールパス生成（マージン・保持タブ対応）
+    pub fn generate_edge_cuts_toolpaths_with_options(
+        &self,
+        geometry: &Geometry,
+        mode: EdgeCutMode,
+        margin: f64,
+        gap_mode: EdgeGapMode,
+        gap_size: f64,
         optimize: bool,
     ) -> Vec<Toolpath> {
         // まず線分・円弧を点列のチェーンに繋ぐ
@@ -237,73 +284,235 @@ impl ToolpathGenerator {
             }
         }
 
-        if mode == EdgeCutMode::OnPath {
-            let mut result: Vec<Toolpath> = chains
+        let extra_margin = margin.max(0.0);
+        let mut result: Vec<Toolpath> = Vec::new();
+
+        if mode == EdgeCutMode::OnPath && extra_margin <= 1e-6 {
+            result = chains
                 .into_iter()
                 .map(|c| self.simplify_path(&c))
                 .filter(|c| c.len() >= 2)
                 .collect();
-            if optimize {
-                Self::optimize_path_sequence(&mut result);
-            }
-            return result;
-        }
+        } else {
+            // 閉ループをポリゴンとしてオフセット
+            let mut closed_shapes: ShapesF64 = Vec::new();
+            let mut open_paths: Vec<Toolpath> = Vec::new();
 
-        // Outside / Inside の場合は閉ループをポリゴンとしてオフセット
-        let mut closed_shapes: ShapesF64 = Vec::new();
-        let mut open_paths: Vec<Toolpath> = Vec::new();
-
-        for chain in chains {
-            if chain.len() >= 3 && chain.first().unwrap().distance_to(chain.last().unwrap()) < 0.05 {
-                let contour: Vec<[f64; 2]> = chain[..chain.len() - 1]
-                    .iter()
-                    .map(|p| [p.x, p.y])
-                    .collect();
-                if contour.len() >= 3 {
-                    closed_shapes.push(vec![contour]);
-                }
-            } else if chain.len() >= 2 {
-                open_paths.push(self.simplify_path(&chain));
-            }
-        }
-
-        let mut result: Vec<Toolpath> = Vec::new();
-
-        if !closed_shapes.is_empty() {
-            // 複数外形がある場合も一旦整理（Union）
-            let empty: ShapesF64 = Vec::new();
-            let normalized = closed_shapes.overlay_as::<i64>(&empty, OverlayRule::Union, FillRule::EvenOdd);
-            let offset_val = match mode {
-                EdgeCutMode::Outside => self.tool_diameter * 0.5,
-                EdgeCutMode::Inside => -self.tool_diameter * 0.5,
-                EdgeCutMode::OnPath => 0.0,
-            };
-            let mut style = OutlineStyle::new(offset_val);
-            style.join = LineJoin::Round(0.2);
-
-            let offset_shapes = normalized.outline_as::<i64>(&style);
-            for shape in offset_shapes {
-                for contour in shape {
-                    if contour.len() < 3 {
-                        continue;
+            for chain in chains {
+                if chain.len() >= 3
+                    && chain.first().unwrap().distance_to(chain.last().unwrap()) < 0.05
+                {
+                    let contour: Vec<[f64; 2]> = chain[..chain.len() - 1]
+                        .iter()
+                        .map(|p| [p.x, p.y])
+                        .collect();
+                    if contour.len() >= 3 {
+                        closed_shapes.push(vec![contour]);
                     }
-                    let mut pts: Vec<Point2> = contour.iter().map(|p| Point2::new(p[0], p[1])).collect();
-                    pts.push(pts[0]);
-                    let simplified = self.simplify_closed_path(&pts);
-                    if simplified.len() >= 4 {
-                        result.push(simplified);
+                } else if chain.len() >= 2 {
+                    open_paths.push(self.simplify_path(&chain));
+                }
+            }
+
+            if !closed_shapes.is_empty() {
+                // 複数外形がある場合も一旦整理（Union）
+                let empty: ShapesF64 = Vec::new();
+                let normalized =
+                    closed_shapes.overlay_as::<i64>(&empty, OverlayRule::Union, FillRule::EvenOdd);
+                let offset_val = match mode {
+                    EdgeCutMode::Outside => self.tool_diameter * 0.5 + extra_margin,
+                    EdgeCutMode::Inside => -(self.tool_diameter * 0.5 + extra_margin),
+                    EdgeCutMode::OnPath => extra_margin,
+                };
+                let mut style = OutlineStyle::new(offset_val);
+                style.join = LineJoin::Round(0.2);
+
+                let offset_shapes = normalized.outline_as::<i64>(&style);
+                for shape in offset_shapes {
+                    for contour in shape {
+                        if contour.len() < 3 {
+                            continue;
+                        }
+                        let mut pts: Vec<Point2> =
+                            contour.iter().map(|p| Point2::new(p[0], p[1])).collect();
+                        pts.push(pts[0]);
+                        let simplified = self.simplify_closed_path(&pts);
+                        if simplified.len() >= 4 {
+                            result.push(simplified);
+                        }
                     }
                 }
             }
+
+            result.extend(open_paths);
         }
 
-        result.extend(open_paths);
+        if gap_mode != EdgeGapMode::None && gap_size > 0.0 {
+            result = Self::apply_edge_gaps(result, gap_mode, gap_size + self.tool_diameter);
+        }
 
         if optimize {
             Self::optimize_path_sequence(&mut result);
         }
 
         result
+    }
+
+    /// 保持タブ（Gaps）の位置にあるパス区間を除外して複数パスに分割する
+    fn apply_edge_gaps(
+        paths: Vec<Toolpath>,
+        gap_mode: EdgeGapMode,
+        cut_gap_width: f64,
+    ) -> Vec<Toolpath> {
+        if paths.is_empty() || gap_mode == EdgeGapMode::None || cut_gap_width <= 0.0 {
+            return paths;
+        }
+
+        let mut bounds = crate::core::geometry::Bounds::empty();
+        for p in &paths {
+            for &pt in p {
+                bounds.expand_point(pt);
+            }
+        }
+        if !bounds.is_valid() {
+            return paths;
+        }
+
+        let cx = (bounds.min_x + bounds.max_x) * 0.5;
+        let cy = (bounds.min_y + bounds.max_y) * 0.5;
+        let half = cut_gap_width * 0.5;
+
+        let mut out_paths: Vec<Toolpath> = Vec::new();
+
+        for path in paths {
+            if path.len() < 2 {
+                continue;
+            }
+            let was_closed = path.len() >= 3 && path.first().unwrap().distance_to(path.last().unwrap()) < 1e-4;
+            let mut pieces: Vec<Toolpath> = Vec::new();
+            let mut current: Toolpath = Vec::new();
+
+            for seg in path.windows(2) {
+                let a = seg[0];
+                let b = seg[1];
+                let kept_intervals = Self::clip_segment_outside_gaps(a, b, cx, cy, half, gap_mode);
+
+                for (t0, t1) in kept_intervals {
+                    let p0 = Point2::new(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0);
+                    let p1 = Point2::new(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1);
+                    if p0.distance_to(&p1) < 1e-5 {
+                        continue;
+                    }
+                    if let Some(last) = current.last() {
+                        if last.distance_to(&p0) <= 1e-4 {
+                            current.push(p1);
+                        } else {
+                            if current.len() >= 2 {
+                                pieces.push(std::mem::take(&mut current));
+                            } else {
+                                current.clear();
+                            }
+                            current.push(p0);
+                            current.push(p1);
+                        }
+                    } else {
+                        current.push(p0);
+                        current.push(p1);
+                    }
+                }
+            }
+
+            if current.len() >= 2 {
+                pieces.push(current);
+            }
+
+            // 元のパスが閉ループだった場合、先頭片と末尾片が元の開始点で繋がっていれば結合する
+            if was_closed && pieces.len() >= 2 {
+                let first_start = pieces[0][0];
+                let last_end = *pieces.last().unwrap().last().unwrap();
+                if first_start.distance_to(&last_end) <= 1e-4 {
+                    let mut last_piece = pieces.pop().unwrap();
+                    let first_piece = pieces.remove(0);
+                    last_piece.extend(first_piece.into_iter().skip(1));
+                    pieces.insert(0, last_piece);
+                }
+            }
+
+            out_paths.extend(pieces);
+        }
+
+        out_paths
+    }
+
+    /// 線分上のパラメータ t in [0, 1] からギャップ帯外の有効区間列を返す
+    fn clip_segment_outside_gaps(
+        a: Point2,
+        b: Point2,
+        cx: f64,
+        cy: f64,
+        half: f64,
+        mode: EdgeGapMode,
+    ) -> Vec<(f64, f64)> {
+        let mut forbidden: Vec<(f64, f64)> = Vec::new();
+        if matches!(mode, EdgeGapMode::TopBottom | EdgeGapMode::FourSides) {
+            if let Some(iv) = Self::axis_band_interval(a.x, b.x, cx - half, cx + half) {
+                forbidden.push(iv);
+            }
+        }
+        if matches!(mode, EdgeGapMode::LeftRight | EdgeGapMode::FourSides) {
+            if let Some(iv) = Self::axis_band_interval(a.y, b.y, cy - half, cy + half) {
+                forbidden.push(iv);
+            }
+        }
+        if forbidden.is_empty() {
+            return vec![(0.0, 1.0)];
+        }
+        forbidden.sort_by(|u, v| u.0.partial_cmp(&v.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 禁止区間の和集合を [0, 1] から差し引く
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (s, e) in forbidden {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 + 1e-9 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+
+        let mut kept = Vec::new();
+        let mut cursor = 0.0_f64;
+        for (s, e) in merged {
+            if s > cursor + 1e-6 {
+                kept.push((cursor, s));
+            }
+            cursor = cursor.max(e);
+        }
+        if cursor < 1.0 - 1e-6 {
+            kept.push((cursor, 1.0));
+        }
+        kept
+    }
+
+    /// 1次元線分 a + t*(b - a) が [band_min, band_max] に入る t in [0, 1] の区間を求める
+    fn axis_band_interval(a: f64, b: f64, band_min: f64, band_max: f64) -> Option<(f64, f64)> {
+        let d = b - a;
+        if d.abs() < 1e-12 {
+            if a >= band_min && a <= band_max {
+                return Some((0.0, 1.0));
+            }
+            return None;
+        }
+        let t1 = (band_min - a) / d;
+        let t2 = (band_max - a) / d;
+        let t_lo = t1.min(t2).max(0.0);
+        let t_hi = t1.max(t2).min(1.0);
+        if t_hi > t_lo + 1e-9 {
+            Some((t_lo, t_hi))
+        } else {
+            None
+        }
     }
 
     /// ばらばらの線分・円弧を端点距離で繋ぎ合わせて連続パスにする
@@ -568,6 +777,354 @@ impl ToolpathGenerator {
         let optimized_dist = calc_dist(&ordered);
         (ordered, original_dist, optimized_dist)
     }
+
+    /// ドリル穴リストを「通常ドリル穴」と「エンドミルくり抜き円パス (MillHoles)」に分離する
+    pub fn split_and_generate_mill_holes(&self, holes: &[DrillHole]) -> (Vec<DrillHole>, Vec<Toolpath>) {
+        let tool_dia = self.tool_diameter.max(1e-4);
+        let mut plunge_holes = Vec::new();
+        let mut mill_paths = Vec::new();
+
+        for hole in holes {
+            if hole.diameter <= tool_dia + 1e-4 {
+                plunge_holes.push(hole.clone());
+                continue;
+            }
+
+            // エンドミル中心が描く最大半径
+            let max_r = (hole.diameter - tool_dia) * 0.5;
+            if max_r <= 1e-4 {
+                plunge_holes.push(hole.clone());
+                continue;
+            }
+
+            // 中心に削り残しが出ないようにステップオーバーで同心円を生成
+            let step_r = (tool_dia * 0.6).max(0.05);
+            let mut radii = Vec::new();
+            let mut r = (tool_dia * 0.45).min(max_r);
+            while r < max_r - 1e-4 {
+                radii.push(r);
+                r += step_r;
+            }
+            radii.push(max_r);
+
+            for rad in radii {
+                let steps = ((2.0 * PI * rad / self.arc_resolution).ceil() as usize).clamp(24, 64);
+                let mut pts = Vec::with_capacity(steps + 1);
+                for i in 0..=steps {
+                    let ang = 2.0 * PI * ((i % steps) as f64) / (steps as f64);
+                    pts.push(Point2::new(
+                        hole.position.x + rad * ang.cos(),
+                        hole.position.y + rad * ang.sin(),
+                    ));
+                }
+                mill_paths.push(pts);
+            }
+        }
+
+        Self::optimize_path_sequence(&mut mill_paths);
+        (plunge_holes, mill_paths)
+    }
+
+    /// DRC（最小パターン幅、最小クリアランス、現在のツール径での加工不能箇所）を実行する
+    pub fn run_drc(&self, geometry: &Geometry, min_trace_width: f64) -> DrcReport {
+        let mut report = DrcReport::default();
+        let cluster_radius_trace = 0.5_f64;
+
+        // 1. 最小パターン幅の計測と細線検出
+        let mut min_w = f64::INFINITY;
+        for seg in &geometry.segments {
+            if seg.polarity == Polarity::Dark && seg.width > 1e-4 {
+                min_w = min_w.min(seg.width);
+                if seg.width + 1e-5 < min_trace_width {
+                    let mid = Point2::new(
+                        (seg.start.x + seg.end.x) * 0.5,
+                        (seg.start.y + seg.end.y) * 0.5,
+                    );
+                    Self::push_clustered_violation(
+                        &mut report.narrow_traces,
+                        mid,
+                        seg.width.max(0.3),
+                        format!("細線 {:.3}mm < 基準 {:.3}mm", seg.width, min_trace_width),
+                        cluster_radius_trace,
+                    );
+                }
+            }
+        }
+        for arc in &geometry.arcs {
+            if arc.polarity == Polarity::Dark && arc.width > 1e-4 {
+                min_w = min_w.min(arc.width);
+                if arc.width + 1e-5 < min_trace_width {
+                    let mid = Point2::new(
+                        (arc.start.x + arc.end.x) * 0.5,
+                        (arc.start.y + arc.end.y) * 0.5,
+                    );
+                    Self::push_clustered_violation(
+                        &mut report.narrow_traces,
+                        mid,
+                        arc.width.max(0.3),
+                        format!("細円弧 {:.3}mm < 基準 {:.3}mm", arc.width, min_trace_width),
+                        cluster_radius_trace,
+                    );
+                }
+            }
+        }
+        if min_w.is_finite() {
+            report.min_trace_width_mm = Some(min_w);
+        }
+
+        // 2. 統合銅箔ポリゴンからのクリアランス計測と加工不能箇所検出
+        let unified = self.build_unified_copper_shapes(geometry);
+        if unified.is_empty() {
+            return report;
+        }
+
+        struct EdgeSeg {
+            a: Point2,
+            b: Point2,
+            min_x: f64,
+            min_y: f64,
+            max_x: f64,
+            max_y: f64,
+            contour_id: usize,
+            edge_idx: usize,
+            contour_len: usize,
+        }
+
+        let mut contours_edges: Vec<Vec<EdgeSeg>> = Vec::new();
+        let mut contour_bounds: Vec<[f64; 4]> = Vec::new();
+
+        for shape in &unified {
+            for contour in shape {
+                if contour.len() < 3 {
+                    continue;
+                }
+                let cid = contours_edges.len();
+                let n = contour.len();
+                let mut edges = Vec::with_capacity(n);
+                let mut c_min_x = f64::INFINITY;
+                let mut c_min_y = f64::INFINITY;
+                let mut c_max_x = f64::NEG_INFINITY;
+                let mut c_max_y = f64::NEG_INFINITY;
+
+                for i in 0..n {
+                    let p0 = Point2::new(contour[i][0], contour[i][1]);
+                    let p1 = Point2::new(contour[(i + 1) % n][0], contour[(i + 1) % n][1]);
+                    let min_x = p0.x.min(p1.x);
+                    let min_y = p0.y.min(p1.y);
+                    let max_x = p0.x.max(p1.x);
+                    let max_y = p0.y.max(p1.y);
+                    c_min_x = c_min_x.min(min_x);
+                    c_min_y = c_min_y.min(min_y);
+                    c_max_x = c_max_x.max(max_x);
+                    c_max_y = c_max_y.max(max_y);
+                    edges.push(EdgeSeg {
+                        a: p0,
+                        b: p1,
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                        contour_id: cid,
+                        edge_idx: i,
+                        contour_len: n,
+                    });
+                }
+                contours_edges.push(edges);
+                contour_bounds.push([c_min_x, c_min_y, c_max_x, c_max_y]);
+            }
+        }
+
+        let mut min_clearance = f64::INFINITY;
+        let cluster_radius_gap = (self.tool_diameter * 1.5).max(0.3);
+
+        for c1 in 0..contours_edges.len() {
+            for c2 in c1..contours_edges.len() {
+                let threshold = min_clearance.max(self.tool_diameter);
+                let b1 = contour_bounds[c1];
+                let b2 = contour_bounds[c2];
+                if Self::aabb_distance(b1, b2) > threshold {
+                    continue;
+                }
+
+                let edges1 = &contours_edges[c1];
+                let edges2 = &contours_edges[c2];
+
+                for e1 in edges1 {
+                    let start_j = if c1 == c2 { e1.edge_idx + 1 } else { 0 };
+                    for e2 in &edges2[start_j..] {
+                        if e1.contour_id == e2.contour_id {
+                            let diff = e2.edge_idx - e1.edge_idx;
+                            let wrap_diff = e1.contour_len - diff;
+                            if diff.min(wrap_diff) <= 3 {
+                                continue;
+                            }
+                        }
+
+                        let cur_thresh = min_clearance.max(self.tool_diameter);
+                        if Self::aabb_distance(
+                            [e1.min_x, e1.min_y, e1.max_x, e1.max_y],
+                            [e2.min_x, e2.min_y, e2.max_x, e2.max_y],
+                        ) > cur_thresh
+                        {
+                            continue;
+                        }
+
+                        let (dist, p1, p2) =
+                            Self::segment_distance_and_points(e1.a, e1.b, e2.a, e2.b);
+                        if dist <= 1e-4 {
+                            continue;
+                        }
+                        if dist > cur_thresh {
+                            continue;
+                        }
+
+                        let mid = Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+                        // 中点が銅箔ポリゴン内部にある場合はクリアランスではなくパターン肉厚なので除外
+                        if Self::point_in_shapes(mid, &unified) {
+                            continue;
+                        }
+
+                        if dist < min_clearance {
+                            min_clearance = dist;
+                        }
+                        if dist < self.tool_diameter - 1e-4 {
+                            Self::push_clustered_violation(
+                                &mut report.uncut_bridges,
+                                mid,
+                                self.tool_diameter.max(0.3),
+                                format!(
+                                    "加工不能: クリアランス {:.3}mm < ツール径 {:.3}mm",
+                                    dist, self.tool_diameter
+                                ),
+                                cluster_radius_gap,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if min_clearance.is_finite() {
+            report.min_clearance_mm = Some(min_clearance);
+        }
+
+        report
+    }
+
+    fn push_clustered_violation(
+        list: &mut Vec<DrcViolation>,
+        pos: Point2,
+        diameter: f64,
+        description: String,
+        cluster_radius: f64,
+    ) {
+        if list.iter().any(|v| v.position.distance_to(&pos) < cluster_radius) {
+            return;
+        }
+        list.push(DrcViolation {
+            position: pos,
+            diameter,
+            description,
+        });
+    }
+
+    fn aabb_distance(a: [f64; 4], b: [f64; 4]) -> f64 {
+        let dx = if a[2] < b[0] {
+            b[0] - a[2]
+        } else if b[2] < a[0] {
+            a[0] - b[2]
+        } else {
+            0.0
+        };
+        let dy = if a[3] < b[1] {
+            b[1] - a[3]
+        } else if b[3] < a[1] {
+            a[1] - b[3]
+        } else {
+            0.0
+        };
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// 2D点 p が統一シェイプ（外周+穴）の内部にあるかを偶数奇規則で判定
+    fn point_in_shapes(p: Point2, shapes: &ShapesF64) -> bool {
+        let mut inside = false;
+        for shape in shapes {
+            for contour in shape {
+                let n = contour.len();
+                if n < 3 {
+                    continue;
+                }
+                let mut j = n - 1;
+                for i in 0..n {
+                    let yi = contour[i][1];
+                    let yj = contour[j][1];
+                    if (yi > p.y) != (yj > p.y) {
+                        let xi = contour[i][0];
+                        let xj = contour[j][0];
+                        let x_intersect = (xj - xi) * (p.y - yi) / (yj - yi) + xi;
+                        if p.x < x_intersect {
+                            inside = !inside;
+                        }
+                    }
+                    j = i;
+                }
+            }
+        }
+        inside
+    }
+
+    /// 2つの線分 [a0, a1] と [b0, b1] の最短距離と両線分上の最近接点を返す
+    fn segment_distance_and_points(
+        a0: Point2,
+        a1: Point2,
+        b0: Point2,
+        b1: Point2,
+    ) -> (f64, Point2, Point2) {
+        let closest_on_seg = |p: Point2, s0: Point2, s1: Point2| -> Point2 {
+            let dx = s1.x - s0.x;
+            let dy = s1.y - s0.y;
+            let len_sq = dx * dx + dy * dy;
+            if len_sq < 1e-14 {
+                return s0;
+            }
+            let t = (((p.x - s0.x) * dx + (p.y - s0.y) * dy) / len_sq).clamp(0.0, 1.0);
+            Point2::new(s0.x + t * dx, s0.y + t * dy)
+        };
+
+        let cross = |o: Point2, a: Point2, b: Point2| -> f64 {
+            (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+        };
+        let d1 = cross(b0, b1, a0);
+        let d2 = cross(b0, b1, a1);
+        let d3 = cross(a0, a1, b0);
+        let d4 = cross(a0, a1, b1);
+        if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+            && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+        {
+            return (0.0, a0, a0);
+        }
+
+        let candidates = [
+            (a0, closest_on_seg(a0, b0, b1)),
+            (a1, closest_on_seg(a1, b0, b1)),
+            (closest_on_seg(b0, a0, a1), b0),
+            (closest_on_seg(b1, a0, a1), b1),
+        ];
+
+        let mut best_dist = f64::INFINITY;
+        let mut best_pa = a0;
+        let mut best_pb = b0;
+        for (pa, pb) in candidates {
+            let d = pa.distance_to(&pb);
+            if d < best_dist {
+                best_dist = d;
+                best_pa = pa;
+                best_pb = pb;
+            }
+        }
+        (best_dist, best_pa, best_pb)
+    }
 }
 
 #[cfg(test)]
@@ -714,5 +1271,121 @@ mod tests {
         let (segs, stats) = parse_gcode_for_sim(&lines);
         assert!(!segs.is_empty());
         assert!(stats.cut_distance_mm > 0.0);
+    }
+
+    #[test]
+    fn test_edge_cuts_margin_and_gaps() {
+        let mut geo = Geometry::new();
+        // 0..20 x 0..10 の矩形外形
+        geo.polygons.push(crate::core::geometry::PolygonShape {
+            points: vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(20.0, 0.0),
+                Point2::new(20.0, 10.0),
+                Point2::new(0.0, 10.0),
+            ],
+            polarity: Polarity::Dark,
+        });
+        let gen = ToolpathGenerator::new(1.0);
+        let paths = gen.generate_edge_cuts_toolpaths_with_options(
+            &geo,
+            EdgeCutMode::Outside,
+            0.5,
+            EdgeGapMode::FourSides,
+            2.0,
+            true,
+        );
+        // 4辺の中央にタブが入るので、4つのコーナーパスに分割される
+        assert_eq!(paths.len(), 4, "4方向タブにより4本のコーナーパスに分割されること");
+        // マージン 0.5mm + ツール半径 0.5mm = 外側に 1.0mm オフセットされていること
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        for p in &paths {
+            for pt in p {
+                min_x = min_x.min(pt.x);
+                max_x = max_x.max(pt.x);
+            }
+        }
+        assert!((min_x - (-1.0)).abs() < 0.05, "min_x={}", min_x);
+        assert!((max_x - 21.0).abs() < 0.05, "max_x={}", max_x);
+    }
+
+    #[test]
+    fn test_drill_mill_holes() {
+        let holes = vec![
+            DrillHole {
+                position: Point2::new(5.0, 5.0),
+                diameter: 0.8,
+            },
+            DrillHole {
+                position: Point2::new(15.0, 5.0),
+                diameter: 2.0,
+            },
+        ];
+        let gen = ToolpathGenerator::new(0.8);
+        let (plunge, mill_paths) = gen.split_and_generate_mill_holes(&holes);
+        assert_eq!(plunge.len(), 1, "φ0.8穴は通常ドリル穴になること");
+        assert!(!mill_paths.is_empty(), "φ2.0穴はエンドミルくり抜き円パスが生成されること");
+        // 最外周円パスの半径が (2.0 - 0.8)/2 = 0.6mm であること
+        let max_r = mill_paths
+            .iter()
+            .flat_map(|p| p.iter())
+            .map(|pt| pt.distance_to(&Point2::new(15.0, 5.0)))
+            .fold(0.0_f64, f64::max);
+        assert!((max_r - 0.6).abs() < 0.02, "max_r={}", max_r);
+    }
+
+    #[test]
+    fn test_drc_check_clearance_and_width() {
+        let mut geo = Geometry::new();
+        // 太さ0.2mmの線を y=0 と y=0.3 に配置 -> 中心間0.3mm、線幅各0.1mmずつなのでクリアランス0.1mm
+        geo.segments.push(crate::core::geometry::Segment {
+            start: Point2::new(0.0, 0.0),
+            end: Point2::new(10.0, 0.0),
+            width: 0.2,
+            polarity: Polarity::Dark,
+        });
+        geo.segments.push(crate::core::geometry::Segment {
+            start: Point2::new(0.0, 0.3),
+            end: Point2::new(10.0, 0.3),
+            width: 0.12,
+            polarity: Polarity::Dark,
+        });
+
+        let gen = ToolpathGenerator::new(0.2);
+        let report = gen.run_drc(&geo, 0.15);
+
+        let min_w = report.min_trace_width_mm.expect("最小パターン幅が取得できること");
+        assert!((min_w - 0.12).abs() < 1e-4, "min_w={}", min_w);
+        assert_eq!(report.narrow_traces.len(), 1, "0.15mm未満の細線が1件検出されること");
+
+        let min_c = report.min_clearance_mm.expect("最小クリアランスが取得できること");
+        // 線幅 0.2/2 + 0.12/2 = 0.16, 中心間 0.30 -> クリアランス 0.14mm
+        assert!((min_c - 0.14).abs() < 0.02, "min_c={}", min_c);
+        assert!(
+            !report.uncut_bridges.is_empty(),
+            "ツール径0.2mmに対してクリアランス0.14mmの加工不能箇所が検出されること"
+        );
+    }
+
+    #[test]
+    fn test_sample_b_cu_drc_and_mill_holes_gcode() {
+        let geo = GerberParser::parse_file("sample/SSP4-B_Cu.gbr").expect("B_Cu 読込失敗");
+        let gen = ToolpathGenerator::new(0.2);
+        let report = gen.run_drc(&geo, 0.15);
+        assert!(report.min_trace_width_mm.is_some());
+        assert!(report.min_clearance_mm.is_some());
+
+        let drill = ExcellonParser::parse_file("sample/SSP4.drl").expect("Drill 読込失敗");
+        let drill_gen = ToolpathGenerator::new(0.5);
+        let (plunge, mill_paths) = drill_gen.split_and_generate_mill_holes(&drill.holes);
+        let gcode_gen = GCodeGenerator::new(GCodeSettings {
+            cut_z: -1.7,
+            pass_depth: 0.5,
+            ..Default::default()
+        });
+        let lines = gcode_gen.generate_drill_and_mill_gcode(&plunge, &drill.slots, &mill_paths);
+        let (_, stats) = parse_gcode_for_sim(&lines);
+        assert!(stats.estimated_minutes > 0.0);
     }
 }

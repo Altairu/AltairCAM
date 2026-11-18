@@ -5,15 +5,15 @@ use std::thread;
 
 use eframe::egui;
 
-use crate::config::{AppProjectConfig, EdgeCutMode, LayerConfig};
+use crate::config::{AppProjectConfig, EdgeCutMode, EdgeGapMode, LayerConfig, ToolPreset};
 use crate::core::excellon::ExcellonParser;
 use crate::core::geometry::{Bounds, DrillData, DrillHole, Geometry, Point2, Toolpath};
 use crate::core::gerber::GerberParser;
 use crate::core::mirror::{mirror_drill_data, mirror_geometry, MirrorAxis};
-use crate::core::toolpath::ToolpathGenerator;
-use crate::gcode::generator::{GCodeGenerator, GCodeSettings};
+use crate::core::toolpath::{DrcReport, ToolpathGenerator};
+use crate::gcode::generator::{parse_gcode_for_sim, GCodeGenerator, GCodeSettings, GCodeStats};
 use crate::ui::dialogs::{self, DialogsState, HelpTab};
-use crate::ui::preview_2d::Preview2DState;
+use crate::ui::preview_2d::{Preview2DParams, Preview2DState};
 use crate::ui::preview_3d::Preview3DState;
 use crate::ui::simulator::SimulatorState;
 use crate::updater::{self, UpdateInfo};
@@ -51,6 +51,16 @@ pub struct AltairCamApp {
     b_cu_toolpaths: Vec<Toolpath>,
     edge_toolpaths: Vec<Toolpath>,
     drill_ordered_holes: Vec<DrillHole>,
+    drill_plunge_holes: Vec<DrillHole>,
+    drill_mill_toolpaths: Vec<Toolpath>,
+
+    // 加工時間統計・DRC・プリセット状態
+    b_cu_stats: GCodeStats,
+    edge_stats: GCodeStats,
+    drill_stats: GCodeStats,
+    drc_report: Option<DrcReport>,
+    selected_preset_idx: usize,
+    new_preset_name: String,
 
     // 表示コンポーネント
     preview_2d: Preview2DState,
@@ -82,6 +92,14 @@ impl AltairCamApp {
             b_cu_toolpaths: Vec::new(),
             edge_toolpaths: Vec::new(),
             drill_ordered_holes: Vec::new(),
+            drill_plunge_holes: Vec::new(),
+            drill_mill_toolpaths: Vec::new(),
+            b_cu_stats: GCodeStats::default(),
+            edge_stats: GCodeStats::default(),
+            drill_stats: GCodeStats::default(),
+            drc_report: None,
+            selected_preset_idx: 0,
+            new_preset_name: String::new(),
             preview_2d: Preview2DState::default(),
             preview_3d: Preview3DState::default(),
             simulator: SimulatorState::default(),
@@ -218,6 +236,12 @@ impl AltairCamApp {
         self.b_cu_toolpaths.clear();
         self.edge_toolpaths.clear();
         self.drill_ordered_holes.clear();
+        self.drill_plunge_holes.clear();
+        self.drill_mill_toolpaths.clear();
+        self.drc_report = None;
+        self.b_cu_stats = GCodeStats::default();
+        self.edge_stats = GCodeStats::default();
+        self.drill_stats = GCodeStats::default();
 
         if self.config.b_cu.enabled && !self.config.b_cu.filepath.is_empty() {
             match GerberParser::parse_file(&self.config.b_cu.filepath) {
@@ -307,6 +331,49 @@ impl AltairCamApp {
         self.log(format!("原点を左下に移動しました (dx={:.2}, dy={:.2})", dx, dy));
     }
 
+    fn run_b_cu_drc(&mut self) {
+        if let Some(ref g) = self.b_cu_data {
+            let gen = ToolpathGenerator::new(self.config.b_cu.tool_diameter);
+            let report = gen.run_drc(g, self.config.b_cu.drc_min_trace_width);
+            if !report.uncut_bridges.is_empty() || !report.narrow_traces.is_empty() {
+                self.log(format!(
+                    "DRC チェック: 加工不能 {} 件, 細線 {} 件",
+                    report.uncut_bridges.len(),
+                    report.narrow_traces.len()
+                ));
+            }
+            self.drc_report = Some(report);
+        } else {
+            self.drc_report = None;
+        }
+    }
+
+    fn update_gcode_stats(&mut self) {
+        self.b_cu_stats = if self.config.b_cu.enabled {
+            self.build_gcode_for_tab(LayerTab::BCu)
+                .map(|lines| parse_gcode_for_sim(&lines).1)
+                .unwrap_or_default()
+        } else {
+            GCodeStats::default()
+        };
+
+        self.edge_stats = if self.config.edge_cuts.enabled {
+            self.build_gcode_for_tab(LayerTab::EdgeCuts)
+                .map(|lines| parse_gcode_for_sim(&lines).1)
+                .unwrap_or_default()
+        } else {
+            GCodeStats::default()
+        };
+
+        self.drill_stats = if self.config.drill.enabled {
+            self.build_gcode_for_tab(LayerTab::Drill)
+                .map(|lines| parse_gcode_for_sim(&lines).1)
+                .unwrap_or_default()
+        } else {
+            GCodeStats::default()
+        };
+    }
+
     fn regenerate_all_toolpaths(&mut self) {
         if let Some(ref g) = self.b_cu_data {
             let gen = ToolpathGenerator::new(self.config.b_cu.tool_diameter);
@@ -317,15 +384,20 @@ impl AltairCamApp {
                 self.config.b_cu.optimize_toolpath,
             );
             self.log(format!("B_Cu パス生成: {} ループ", self.b_cu_toolpaths.len()));
+            self.run_b_cu_drc();
         } else {
             self.b_cu_toolpaths.clear();
+            self.drc_report = None;
         }
 
         if let Some(ref g) = self.edge_cuts_data {
             let gen = ToolpathGenerator::new(self.config.edge_cuts.tool_diameter);
-            self.edge_toolpaths = gen.generate_edge_cuts_toolpaths(
+            self.edge_toolpaths = gen.generate_edge_cuts_toolpaths_with_options(
                 g,
                 self.config.edge_cuts.edge_cut_mode,
+                self.config.edge_cuts.edge_margin,
+                self.config.edge_cuts.edge_gap_mode,
+                self.config.edge_cuts.edge_gap_size,
                 self.config.edge_cuts.optimize_toolpath,
             );
             self.log(format!("Edge_Cuts パス生成: {} パス", self.edge_toolpaths.len()));
@@ -347,9 +419,29 @@ impl AltairCamApp {
             } else {
                 self.drill_ordered_holes = d.holes.clone();
             }
+
+            if self.config.drill.mill_holes {
+                let gen = ToolpathGenerator::new(self.config.drill.tool_diameter);
+                let (plunge, mill_paths) =
+                    gen.split_and_generate_mill_holes(&self.drill_ordered_holes);
+                self.drill_plunge_holes = plunge;
+                self.drill_mill_toolpaths = mill_paths;
+                self.log(format!(
+                    "Drill MillHoles: 通常穴 {} 個, くり抜き円パス {} 周",
+                    self.drill_plunge_holes.len(),
+                    self.drill_mill_toolpaths.len()
+                ));
+            } else {
+                self.drill_plunge_holes = self.drill_ordered_holes.clone();
+                self.drill_mill_toolpaths.clear();
+            }
         } else {
             self.drill_ordered_holes.clear();
+            self.drill_plunge_holes.clear();
+            self.drill_mill_toolpaths.clear();
         }
+
+        self.update_gcode_stats();
     }
 
     fn build_gcode_for_tab(&self, tab: LayerTab) -> Result<Vec<String>, String> {
@@ -388,7 +480,15 @@ impl AltairCamApp {
                 let Some(d) = &self.drill_data else {
                     return Err("Drill データがありません。先にファイルを読み込んでください。".to_string());
                 };
-                Ok(gen.generate_drill_gcode(&self.drill_ordered_holes, &d.slots))
+                if cfg.mill_holes {
+                    Ok(gen.generate_drill_and_mill_gcode(
+                        &self.drill_plunge_holes,
+                        &d.slots,
+                        &self.drill_mill_toolpaths,
+                    ))
+                } else {
+                    Ok(gen.generate_drill_gcode(&self.drill_ordered_holes, &d.slots))
+                }
             }
         }
     }
@@ -419,15 +519,19 @@ impl AltairCamApp {
     }
 
     fn export_all_gcodes_to_folder(&mut self) {
+        self.regenerate_all_toolpaths();
         let Some(folder) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
         let targets = [
-            (LayerTab::BCu, "b_cu.nc"),
-            (LayerTab::EdgeCuts, "edge_cuts.nc"),
-            (LayerTab::Drill, "drill.nc"),
+            (LayerTab::BCu, "b_cu.nc", self.config.b_cu.enabled),
+            (LayerTab::EdgeCuts, "edge_cuts.nc", self.config.edge_cuts.enabled),
+            (LayerTab::Drill, "drill.nc", self.config.drill.enabled),
         ];
-        for (tab, filename) in targets {
+        for (tab, filename, enabled) in targets {
+            if !enabled {
+                continue;
+            }
             if let Ok(lines) = self.build_gcode_for_tab(tab) {
                 let out_path = folder.join(filename);
                 match GCodeGenerator::save_to_file(&lines, &out_path) {
@@ -606,6 +710,9 @@ impl eframe::App for AltairCamApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let tab = self.active_layer_tab;
+                        self.preset_selector_ui(ui, tab);
+                        ui.separator();
+
                         let changed = match tab {
                             LayerTab::BCu => Self::layer_settings_ui(
                                 ui,
@@ -629,7 +736,14 @@ impl eframe::App for AltairCamApp {
 
                         if changed {
                             self.save_default_config();
+                            self.update_gcode_stats();
                         }
+
+                        if tab == LayerTab::BCu {
+                            self.drc_summary_ui(ui);
+                        }
+
+                        self.stats_summary_ui(ui, tab);
 
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
@@ -641,12 +755,20 @@ impl eframe::App for AltairCamApp {
                                 self.regenerate_all_toolpaths();
                                 match self.build_gcode_for_tab(tab) {
                                     Ok(lines) => {
-                                        let label = match tab {
-                                            LayerTab::BCu => "B_Cu",
-                                            LayerTab::EdgeCuts => "Edge_Cuts",
-                                            LayerTab::Drill => "Drill",
+                                        let (label, tool_dia) = match tab {
+                                            LayerTab::BCu => {
+                                                ("B_Cu", self.config.b_cu.tool_diameter)
+                                            }
+                                            LayerTab::EdgeCuts => (
+                                                "Edge_Cuts",
+                                                self.config.edge_cuts.tool_diameter,
+                                            ),
+                                            LayerTab::Drill => {
+                                                ("Drill", self.config.drill.tool_diameter)
+                                            }
                                         };
-                                        self.simulator.load_gcode_lines(label, &lines);
+                                        self.simulator
+                                            .load_gcode_lines_with_tool(label, &lines, tool_dia);
                                         self.active_view_tab = ViewTab::Simulation;
                                     }
                                     Err(e) => self.log(e),
@@ -685,20 +807,30 @@ impl eframe::App for AltairCamApp {
             match self.active_view_tab {
                 ViewTab::Preview2D => {
                     let drill_pts: Vec<Point2> = self
-                        .drill_ordered_holes
+                        .drill_plunge_holes
                         .iter()
                         .map(|h| h.position)
                         .collect();
-                    self.preview_2d.ui(
-                        ui,
+                    let drc_violations = self
+                        .drc_report
+                        .as_ref()
+                        .map(|r| r.all_violations())
+                        .unwrap_or_default();
+                    let params = Preview2DParams {
                         b_cu,
-                        edge,
+                        edge_cuts: edge,
                         drill,
-                        &self.b_cu_toolpaths,
-                        &self.edge_toolpaths,
-                        &drill_pts,
-                        bounds,
-                    );
+                        b_cu_paths: &self.b_cu_toolpaths,
+                        edge_paths: &self.edge_toolpaths,
+                        drill_order: &drill_pts,
+                        drill_mill_paths: &self.drill_mill_toolpaths,
+                        b_cu_tool_dia: self.config.b_cu.tool_diameter,
+                        edge_tool_dia: self.config.edge_cuts.tool_diameter,
+                        drill_tool_dia: self.config.drill.tool_diameter,
+                        drc_violations: &drc_violations,
+                        total_bounds: bounds,
+                    };
+                    self.preview_2d.ui(ui, params);
                 }
                 ViewTab::Preview3D => {
                     self.preview_3d.ui(
@@ -730,6 +862,181 @@ impl eframe::App for AltairCamApp {
 }
 
 impl AltairCamApp {
+    fn layer_name(tab: LayerTab) -> &'static str {
+        match tab {
+            LayerTab::BCu => "B_Cu",
+            LayerTab::EdgeCuts => "Edge_Cuts",
+            LayerTab::Drill => "Drill",
+        }
+    }
+
+    fn preset_selector_ui(&mut self, ui: &mut egui::Ui, tab: LayerTab) {
+        let target_layer = Self::layer_name(tab);
+        let matching_indices: Vec<usize> = self
+            .config
+            .presets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.target_layer == target_layer)
+            .map(|(i, _)| i)
+            .collect();
+
+        egui::CollapsingHeader::new("切削条件プリセット")
+            .default_open(false)
+            .show(ui, |ui| {
+                if !matching_indices.is_empty() {
+                    if !matching_indices.contains(&self.selected_preset_idx) {
+                        self.selected_preset_idx = matching_indices[0];
+                    }
+                    let selected_name = self.config.presets[self.selected_preset_idx].name.clone();
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(format!("preset_combo_{:?}", tab))
+                            .selected_text(selected_name)
+                            .width(170.0)
+                            .show_ui(ui, |ui| {
+                                for &idx in &matching_indices {
+                                    let name = &self.config.presets[idx].name;
+                                    ui.selectable_value(&mut self.selected_preset_idx, idx, name);
+                                }
+                            });
+                        if ui
+                            .button("適用")
+                            .on_hover_text("選択中のプリセット条件をこのレイヤーに反映します")
+                            .clicked()
+                        {
+                            let preset = self.config.presets[self.selected_preset_idx].clone();
+                            match tab {
+                                LayerTab::BCu => self.config.b_cu.apply_preset(&preset),
+                                LayerTab::EdgeCuts => self.config.edge_cuts.apply_preset(&preset),
+                                LayerTab::Drill => self.config.drill.apply_preset(&preset),
+                            }
+                            self.save_default_config();
+                            self.regenerate_all_toolpaths();
+                            self.log(format!("プリセット適用: {}", preset.name));
+                        }
+                        if ui
+                            .button("削除")
+                            .on_hover_text("選択中のプリセットを削除します")
+                            .clicked()
+                        {
+                            let removed = self.config.presets.remove(self.selected_preset_idx);
+                            self.selected_preset_idx = 0;
+                            self.save_default_config();
+                            self.log(format!("プリセット削除: {}", removed.name));
+                        }
+                    });
+                } else {
+                    ui.label("このレイヤー用のプリセットはありません。");
+                }
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_preset_name)
+                            .desired_width(170.0)
+                            .hint_text("新しいプリセット名"),
+                    );
+                    if ui
+                        .button("保存")
+                        .on_hover_text("現在の切削条件を新しいプリセットとして保存します")
+                        .clicked()
+                    {
+                        let trimmed = self.new_preset_name.trim().to_string();
+                        if !trimmed.is_empty() {
+                            let cfg = match tab {
+                                LayerTab::BCu => &self.config.b_cu,
+                                LayerTab::EdgeCuts => &self.config.edge_cuts,
+                                LayerTab::Drill => &self.config.drill,
+                            };
+                            let preset =
+                                ToolPreset::from_layer(trimmed.clone(), target_layer, cfg);
+                            self.config.presets.push(preset);
+                            self.selected_preset_idx = self.config.presets.len() - 1;
+                            self.new_preset_name.clear();
+                            self.save_default_config();
+                            self.log(format!("プリセット保存: {}", trimmed));
+                        }
+                    }
+                });
+            });
+    }
+
+    fn drc_summary_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("DRC チェック結果 (B_Cu)");
+                if ui
+                    .small_button("再チェック")
+                    .on_hover_text("現在のツール径と基準値でクリアランス・細線を再検査します")
+                    .clicked()
+                {
+                    self.run_b_cu_drc();
+                }
+            });
+
+            if let Some(ref rep) = self.drc_report {
+                let width_str = rep
+                    .min_trace_width_mm
+                    .map(|v| format!("{:.3} mm", v))
+                    .unwrap_or_else(|| "---".to_string());
+                let clear_str = rep
+                    .min_clearance_mm
+                    .map(|v| format!("{:.3} mm", v))
+                    .unwrap_or_else(|| "---".to_string());
+                ui.label(format!("最小パターン幅: {} / 最小クリアランス: {}", width_str, clear_str));
+
+                if rep.uncut_bridges.is_empty() && rep.narrow_traces.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(20, 130, 60),
+                        "問題なし（現在のツール径で加工可能です）",
+                    );
+                } else {
+                    if !rep.uncut_bridges.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 40, 40),
+                            format!(
+                                "加工不能箇所 (ツール径不足): {} 箇所",
+                                rep.uncut_bridges.len()
+                            ),
+                        );
+                    }
+                    if !rep.narrow_traces.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 110, 20),
+                            format!("基準幅未満の細線: {} 箇所", rep.narrow_traces.len()),
+                        );
+                    }
+                }
+            } else {
+                ui.label("B_Cu 読み込み後に自動チェックされます。");
+            }
+        });
+    }
+
+    fn stats_summary_ui(&self, ui: &mut egui::Ui, tab: LayerTab) {
+        let cur = match tab {
+            LayerTab::BCu => &self.b_cu_stats,
+            LayerTab::EdgeCuts => &self.edge_stats,
+            LayerTab::Drill => &self.drill_stats,
+        };
+        let total_min = self.b_cu_stats.estimated_minutes
+            + self.edge_stats.estimated_minutes
+            + self.drill_stats.estimated_minutes;
+
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.label(format!(
+                "{} 見積もり: 切削 {:.1}mm / 早送り {:.1}mm / 約 {:.1} 分",
+                Self::layer_name(tab),
+                cur.cut_distance_mm,
+                cur.rapid_distance_mm,
+                cur.estimated_minutes
+            ));
+            ui.label(format!("全有効レイヤー合計の推定加工時間: 約 {:.1} 分", total_min));
+        });
+    }
+
     fn layer_settings_ui(
         ui: &mut egui::Ui,
         cfg: &mut LayerConfig,
@@ -850,6 +1157,18 @@ impl AltairCamApp {
                             .on_hover_text("隣接パスの重なり率 (0.0〜0.8)")
                             .changed();
                         ui.end_row();
+
+                        ui.label("最小許容パターン幅 (mm):")
+                            .on_hover_text("DRCチェックで警告を出す最小配線幅のしきい値です。");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.drc_min_trace_width)
+                                    .speed(0.01)
+                                    .range(0.01..=2.0),
+                            )
+                            .on_hover_text("この幅未満の配線をDRCで警告表示します (mm)")
+                            .changed();
+                        ui.end_row();
                     });
                 changed |= ui
                     .checkbox(&mut cfg.optimize_toolpath, "パス順序を最適化する")
@@ -873,12 +1192,80 @@ impl AltairCamApp {
                         .on_hover_text("外形線の中心上をそのまま削ります。")
                         .changed();
                 });
+
+                egui::Grid::new("edge_cuts_gap_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("外周マージン (mm):")
+                            .on_hover_text("外形カット位置に追加する余白距離です。基板外周を少し大きめに切りたい場合に使います。");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cfg.edge_margin)
+                                    .speed(0.05)
+                                    .range(0.0..=10.0),
+                            )
+                            .on_hover_text("外形からの追加余白 (mm)")
+                            .changed();
+                        ui.end_row();
+
+                        ui.label("保持タブ (Gaps):")
+                            .on_hover_text("加工中に基板が外れて飛ぶのを防ぐため、一部を切り残すブリッジ配置を選択します。");
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .radio_value(&mut cfg.edge_gap_mode, EdgeGapMode::None, "なし")
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut cfg.edge_gap_mode,
+                                    EdgeGapMode::TopBottom,
+                                    "上下2",
+                                )
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut cfg.edge_gap_mode,
+                                    EdgeGapMode::LeftRight,
+                                    "左右2",
+                                )
+                                .changed();
+                            changed |= ui
+                                .radio_value(
+                                    &mut cfg.edge_gap_mode,
+                                    EdgeGapMode::FourSides,
+                                    "4方",
+                                )
+                                .changed();
+                        });
+                        ui.end_row();
+
+                        ui.label("タブ幅 (mm):")
+                            .on_hover_text("保持タブ（切り残し部分）の幅です。ツール直径分も自動的に考慮されます。");
+                        changed |= ui
+                            .add_enabled(
+                                cfg.edge_gap_mode != EdgeGapMode::None,
+                                egui::DragValue::new(&mut cfg.edge_gap_size)
+                                    .speed(0.1)
+                                    .range(0.2..=20.0),
+                            )
+                            .on_hover_text("切り残す保持タブの幅 (mm)")
+                            .changed();
+                        ui.end_row();
+                    });
+
                 changed |= ui
                     .checkbox(&mut cfg.optimize_toolpath, "パス順序を最適化する")
                     .on_hover_text("複数の外形パスがある場合に移動距離が短くなる順で加工します。")
                     .changed();
             }
             LayerTab::Drill => {
+                changed |= ui
+                    .checkbox(
+                        &mut cfg.mill_holes,
+                        "大きい穴をエンドミルでくり抜く (Mill Holes)",
+                    )
+                    .on_hover_text("ツール直径より大きい穴を、同心円ポケット加工でくり抜きます。刃物交換を減らせます。")
+                    .changed();
                 changed |= ui
                     .checkbox(&mut cfg.optimize_toolpath, "穴あけ順序を最適化する")
                     .on_hover_text("穴あけの移動順序を最適化し、移動距離と加工時間を短縮します。")

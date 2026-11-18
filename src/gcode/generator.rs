@@ -109,27 +109,31 @@ impl GCodeGenerator {
         depths
     }
 
-    /// 連続ツールパスからGコードを生成（マルチパスZステップダウン対応）
-    pub fn generate_paths_gcode(&self, paths: &[Toolpath], connect_tolerance: f64) -> Vec<String> {
-        let mut lines = self.generate_header();
+    /// 連続ツールパスを既存ライン列へ追記する共通ヘルパー
+    fn append_paths_gcode(
+        &self,
+        lines: &mut Vec<String>,
+        paths: &[Toolpath],
+        connect_tolerance: f64,
+        label_prefix: &str,
+    ) {
         if paths.is_empty() {
-            lines.extend(self.generate_footer());
-            return lines;
+            return;
         }
-
         let z_levels = self.z_passes();
         let total_passes = z_levels.len();
 
         for (pass_idx, &z_cut) in z_levels.iter().enumerate() {
             if total_passes > 1 {
                 lines.push(format!(
-                    "(Pass {}/{} - Z={:.3})",
+                    "({} Pass {}/{} - Z={:.3})",
+                    label_prefix,
                     pass_idx + 1,
                     total_passes,
                     z_cut
                 ));
             } else {
-                lines.push("(Cutting paths)".to_string());
+                lines.push(format!("({})", label_prefix));
             }
 
             let mut prev_end: Option<Point2> = None;
@@ -195,13 +199,28 @@ impl GCodeGenerator {
                 }
             }
         }
+    }
 
+    /// 連続ツールパスからGコードを生成（マルチパスZステップダウン対応）
+    pub fn generate_paths_gcode(&self, paths: &[Toolpath], connect_tolerance: f64) -> Vec<String> {
+        let mut lines = self.generate_header();
+        self.append_paths_gcode(&mut lines, paths, connect_tolerance, "Cutting paths");
         lines.extend(self.generate_footer());
         lines
     }
 
     /// ドリル穴と長穴からGコードを生成
     pub fn generate_drill_gcode(&self, holes: &[DrillHole], slots: &[DrillSlot]) -> Vec<String> {
+        self.generate_drill_and_mill_gcode(holes, slots, &[])
+    }
+
+    /// ドリル穴・長穴・エンドミルくり抜き (MillHoles) をまとめてGコード生成する
+    pub fn generate_drill_and_mill_gcode(
+        &self,
+        holes: &[DrillHole],
+        slots: &[DrillSlot],
+        mill_paths: &[Toolpath],
+    ) -> Vec<String> {
         let mut lines = self.generate_header();
         let z_levels = self.z_passes();
 
@@ -280,6 +299,10 @@ impl GCodeGenerator {
                     ));
                 }
             }
+        }
+
+        if !mill_paths.is_empty() {
+            self.append_paths_gcode(&mut lines, mill_paths, 0.005, "Mill holes");
         }
 
         lines.extend(self.generate_footer());
